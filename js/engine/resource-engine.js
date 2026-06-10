@@ -125,7 +125,10 @@ export class ResourceEngine {
   constructor(store) {
     this._store = store;
     this._cache = new Map();
-    this._cacheVersion = 0;
+    this._cacheVersion = -1;
+
+    // Invalidate cache on any data mutation or state restore
+    this._store.subscribe(() => this._invalidateIfStale());
   }
 
   // ── Conflict detection ───────────────────────────────────────────
@@ -554,8 +557,7 @@ export class ResourceEngine {
 
   /** Invalidate all cached results when the underlying store has changed. */
   _invalidateIfStale() {
-    const s = this._store.state;
-    const version = `${s.tasks.size}:${s.resources.size}`;
+    const version = this._store.state.version;
     if (this._cacheVersion !== version) {
       this._cache.clear();
       this._cacheVersion = version;

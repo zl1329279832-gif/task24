@@ -169,12 +169,27 @@ class App {
   /**
    * Send a message to the worker and return a promise that resolves with the
    * result.  Falls back to a resolved promise when no worker is available.
+   *
+   * Includes the current store version so that stale results (computed
+   * against a state that has since been undone/redone) can be detected
+   * and discarded by the caller.
    */
   workerRequest(type, payload) {
     if (!this.worker) return Promise.resolve(null);
     const id = ++this.workerReqId;
+    const sentVersion = this.store.state.version;
     return new Promise((resolve, reject) => {
-      this.workerPending.set(id, { resolve, reject });
+      this.workerPending.set(id, {
+        resolve: (result) => {
+          // Discard results if the store has been restored/changed since request
+          if (this.store.state.version !== sentVersion) {
+            resolve(null); // silently discard stale result
+          } else {
+            resolve(result);
+          }
+        },
+        reject,
+      });
       this.worker.postMessage({ id, type, payload });
     });
   }
@@ -227,26 +242,67 @@ class App {
   /* ---------------------------------------------------------------------- */
 
   /**
-   * Read one or more CSV files, parse them, merge into the store, and push
-   * an undo snapshot.
+   * Read one or more CSV files, parse them, validate for issues, merge into
+   * the store, and push an undo snapshot.
+   *
+   * The pre-import state is captured via checkpoint() BEFORE any mutations
+   * so that undo always reverts to the exact pre-import state — including
+   * task dependencies AND resource allocations together.
    */
   async handleCSVImport(files) {
+    // Capture a checkpoint of the current state BEFORE importing.
+    // This ensures undo will atomically revert all four collections
+    // (projects, tasks, risks, resources) together.
+    this.historyManager.checkpoint('导入前状态');
+
     const results = [];
+    const allWarnings = [];
+    const allErrors = [];
+
     for (const file of files) {
       try {
         const text = await this._readFile(file);
         const data = this.csvParser.parse(text);
+
+        // Validate before merging — detect cycles, dangling refs, overload
+        const validation = CSVParser.validateImportData(data, this.store);
+        allWarnings.push(...validation.warnings);
+        allErrors.push(...validation.errors);
+
+        // Import even if warnings exist (errors are non-blocking warnings
+        // in this context — user can undo if needed)
         this.store.importData(data);
-        results.push({ name: file.name, rows: data.tasks?.length ?? 0, ok: true });
+
+        const rowCount = (data.projects?.length ?? 0) +
+                         (data.tasks?.length ?? 0) +
+                         (data.risks?.length ?? 0) +
+                         (data.resources?.length ?? 0);
+        results.push({ name: file.name, rows: rowCount, ok: true });
       } catch (err) {
         results.push({ name: file.name, error: err.message, ok: false });
       }
     }
 
-    // Push an undo checkpoint
+    // Push post-import state as undo checkpoint
     this.historyManager.push('CSV 导入');
 
-    // Summarise
+    // Show validation errors/warnings
+    if (allErrors.length > 0) {
+      for (const err of allErrors) {
+        this.showToast(err, 'error', 8000);
+      }
+    }
+    if (allWarnings.length > 0) {
+      const shown = allWarnings.slice(0, 5);
+      for (const warn of shown) {
+        this.showToast(warn, 'warning', 6000);
+      }
+      if (allWarnings.length > 5) {
+        this.showToast(`还有 ${allWarnings.length - 5} 条验证警告`, 'warning', 4000);
+      }
+    }
+
+    // Summarise import results
     const ok   = results.filter((r) => r.ok);
     const fail = results.filter((r) => !r.ok);
     if (ok.length) {
@@ -256,6 +312,12 @@ class App {
     fail.forEach((r) => {
       this.showToast(`${r.name} 导入失败: ${r.error}`, 'error', 6000);
     });
+
+    // Run post-import circular dependency check against the full store
+    const cycles = this.dependencyEngine.detectCircularDependencies?.();
+    if (cycles?.length) {
+      this.showToast(`导入后检测到 ${cycles.length} 个循环依赖，可撤销导入`, 'error', 8000);
+    }
   }
 
   /** Promise wrapper around FileReader. */
@@ -333,6 +395,16 @@ class App {
 
   onStoreChange(event) {
     this.updateStatusBar();
+
+    // After a full state restore (undo/redo/scenario-load), force an
+    // immediate re-render instead of debouncing — the entire state has
+    // changed and engine caches have already been invalidated by the
+    // 'restore' event.
+    if (event?.type === 'restore') {
+      this._renderCurrentView();
+      return;
+    }
+
     this._debouncedRender();
 
     // Check for circular dependencies whenever task deps change
@@ -381,15 +453,15 @@ class App {
     }
   }
 
-  /** Serialize store state and write to localStorage. */
+  /** Serialize store state and write to localStorage using an atomic snapshot. */
   saveState() {
     try {
-      const exported = this.store.exportData();
+      const snapshot = this.store.getSnapshot();
       const payload = {
-        projects:  exported.projects  || [],
-        tasks:     exported.tasks     || [],
-        risks:     exported.risks     || [],
-        resources: exported.resources || [],
+        projects:  snapshot.projects  || [],
+        tasks:     snapshot.tasks     || [],
+        risks:     snapshot.risks     || [],
+        resources: snapshot.resources || [],
         view:      this.viewName,
         savedAt:   new Date().toISOString(),
       };
@@ -488,16 +560,55 @@ class App {
   /**
    * Ask the risk engine for an HTML report, then open it in a new browser
    * window (or trigger a download).
+   *
+   * Takes an atomic snapshot of the store first so that the report
+   * reflects a single consistent point-in-time state.
    */
   async exportRiskReport() {
     try {
-      const html = this.riskEngine.exportReportHTML?.();
+      // Take an atomic snapshot to ensure the report and any supplementary
+      // data (resource conflicts, dependency issues) are from the same state
+      const snapshot = this.store.getSnapshot();
+      const version = snapshot.version;
+
+      // Gather supplementary data from engines (all based on current store state)
+      const cycles = this.dependencyEngine.detectCircularDependencies?.() || [];
+      const crossProjectDeps = this.dependencyEngine.getCrossProjectDeps?.() || [];
+      const resourceOverloads = this.resourceEngine.findOverloadedResources?.() || [];
+
+      // Check risk level consistency
+      const riskLevelChanges = [];
+      for (const r of snapshot.risks) {
+        const expected = (r.probability || 3) * (r.impact || 3);
+        let expectedLevel;
+        if (expected >= 20) expectedLevel = 'critical';
+        else if (expected >= 12) expectedLevel = 'high';
+        else if (expected >= 6) expectedLevel = 'medium';
+        else expectedLevel = 'low';
+        if (r.level && r.level !== expectedLevel) {
+          riskLevelChanges.push(`"${r.name}": stated ${r.level}, computed ${expectedLevel} (P${r.probability}×I${r.impact}=${expected})`);
+        }
+      }
+
+      const extras = {
+        cycles: cycles.length > 0 ? cycles : null,
+        crossProjectDeps: crossProjectDeps.length > 0 ? crossProjectDeps : null,
+        resourceOverloads: resourceOverloads.length > 0 ? resourceOverloads : null,
+        riskLevelChanges: riskLevelChanges.length > 0 ? riskLevelChanges : null,
+      };
+
+      const html = this.riskEngine.exportReportHTML?.(null, extras);
       if (html) {
+        // Verify the store hasn't changed since we started generating
+        if (this.store.state.version !== version) {
+          this.showToast('状态已变更，请重新导出', 'warning');
+          return;
+        }
+
         const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
         const url  = URL.createObjectURL(blob);
         const win  = window.open(url, '_blank');
         if (!win) {
-          // Popup blocked — fall back to download
           const a  = document.createElement('a');
           a.href     = url;
           a.download = 'risk-report.html';
@@ -625,10 +736,17 @@ class App {
     content.classList.toggle('filter-collapsed');
   }
 
-  /** Export current store data as a CSV download. */
+  /** Export current store data as a CSV download using an atomic snapshot. */
   _exportCSV() {
     try {
-      const data = this.store.exportData();
+      // Use getSnapshot() for a consistent point-in-time export
+      const snapshot = this.store.getSnapshot();
+      const data = {
+        projects: snapshot.projects,
+        tasks: snapshot.tasks,
+        risks: snapshot.risks,
+        resources: snapshot.resources,
+      };
       const csv = CSVParser.exportData(data);
       if (!csv) { this.showToast('CSV 导出不可用', 'warning'); return; }
       const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });

@@ -344,10 +344,19 @@ export class RiskEngine {
   }
 
   // ── Export: HTML ──────────────────────────────────────────────────
-  exportReportHTML(projectId) {
+  /**
+   * @param {string}  [projectId]
+   * @param {Object}  [extras] - additional sections for the report
+   * @param {Array}   [extras.cycles] - circular dependency descriptions
+   * @param {Array}   [extras.crossProjectDeps] - cross-project dep info
+   * @param {Array}   [extras.resourceOverloads] - overloaded resource info
+   * @param {Array}   [extras.riskLevelChanges] - risk level inconsistencies
+   */
+  exportReportHTML(projectId, extras) {
     const report = this.generateReport(projectId);
     const { summary } = report.riskMatrix;
     const m = report.mitigationStatus;
+    const ext = extras || {};
 
     const riskRows = report.topRisks
       .map(
@@ -375,6 +384,54 @@ export class RiskEngine {
 
     const recItems = report.recommendations.map((r) => `<li>${this._esc(r)}</li>`).join('');
 
+    // Build extra sections
+    let cycleSection = '';
+    if (ext.cycles && ext.cycles.length > 0) {
+      const items = ext.cycles.map(c => `<li class="alert-item">${this._esc(typeof c === 'string' ? c : c.description)}</li>`).join('');
+      cycleSection = `<h2>Circular Dependencies</h2>
+        <div style="background:#fff3cd;border:1px solid #ffc107;border-radius:6px;padding:1rem;margin:1rem 0;">
+          <p style="color:#856404;font-weight:bold;">⚠ ${ext.cycles.length} circular dependency chain(s) detected:</p>
+          <ul>${items}</ul>
+        </div>`;
+    }
+
+    let crossProjSection = '';
+    if (ext.crossProjectDeps && ext.crossProjectDeps.length > 0) {
+      const cpRows = ext.crossProjectDeps.map(d =>
+        `<tr>
+          <td>${this._esc(d.fromProject?.name || '')}</td>
+          <td>${this._esc(d.fromTask?.name || '')}</td>
+          <td>→</td>
+          <td>${this._esc(d.toProject?.name || '')}</td>
+          <td>${this._esc(d.toTask?.name || '')}</td>
+        </tr>`
+      ).join('');
+      crossProjSection = `<h2>Cross-Project Dependencies</h2>
+        <table><thead><tr><th>Source Project</th><th>Source Task</th><th></th><th>Target Project</th><th>Target Task</th></tr></thead>
+        <tbody>${cpRows}</tbody></table>`;
+    }
+
+    let overloadSection = '';
+    if (ext.resourceOverloads && ext.resourceOverloads.length > 0) {
+      const olRows = ext.resourceOverloads.map(o =>
+        `<tr>
+          <td>${this._esc(o.resourceName)}</td>
+          <td>${o.totalAllocation}%</td>
+          <td>${o.maxCapacity}%</td>
+          <td style="color:${LEVEL_COLORS.high}">${o.overloadPercentage}% over</td>
+        </tr>`
+      ).join('');
+      overloadSection = `<h2>Resource Overloads</h2>
+        <table><thead><tr><th>Resource</th><th>Peak Allocation</th><th>Max Capacity</th><th>Overload</th></tr></thead>
+        <tbody>${olRows}</tbody></table>`;
+    }
+
+    let riskLevelSection = '';
+    if (ext.riskLevelChanges && ext.riskLevelChanges.length > 0) {
+      const rlItems = ext.riskLevelChanges.map(c => `<li>${this._esc(c)}</li>`).join('');
+      riskLevelSection = `<h2>Risk Level Inconsistencies</h2><ul>${rlItems}</ul>`;
+    }
+
     return `<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="UTF-8"><title>${this._esc(report.title)}</title>
@@ -389,6 +446,7 @@ export class RiskEngine {
   .summary-card { padding: 1rem; border-radius: 6px; text-align: center; color: #fff; font-weight: bold; }
   ul { padding-left: 1.5rem; }
   .meta { color: #888; font-size: .9rem; }
+  .alert-item { color: #856404; }
 </style></head>
 <body>
 <h1>${this._esc(report.title)}</h1>
@@ -410,6 +468,11 @@ ${riskRows ? `<h2>Top Risks</h2><table><thead><tr><th>Name</th><th>Score</th><th
 <h2>Mitigation Status</h2>
 <table><thead><tr><th>On Track</th><th>At Risk</th><th>Overdue</th><th>Not Started</th></tr></thead>
 <tbody><tr><td>${m.onTrack}</td><td>${m.atRisk}</td><td>${m.overdue}</td><td>${m.notStarted}</td></tr></tbody></table>
+
+${cycleSection}
+${crossProjSection}
+${overloadSection}
+${riskLevelSection}
 
 ${recItems ? `<h2>Recommendations</h2><ul>${recItems}</ul>` : ''}
 </body></html>`;

@@ -3,8 +3,9 @@
  * Undo/redo system for the portfolio management dashboard.
  *
  * Captures state snapshots on significant mutations and maintains
- * a bounded undo stack and a redo stack.  Uses structuredClone for
- * efficient deep copying with a JSON.parse/stringify fallback.
+ * a bounded undo stack and a redo stack.  Uses the Store's own
+ * getSnapshot() / restoreFromSnapshot() methods to guarantee that
+ * ALL engine caches are invalidated on every restore.
  */
 
 import { Store } from './store.js';
@@ -28,69 +29,6 @@ function deepClone(obj) {
     // structuredClone can throw on non-cloneable values; fall through
   }
   return JSON.parse(JSON.stringify(obj));
-}
-
-/**
- * Serialise a Store's data into a plain-object snapshot.
- * Maps are converted to arrays for clone-friendliness.
- */
-function snapshotState(store) {
-  return {
-    projects: Array.from(store.state.projects.values()).map(p => deepClone(p)),
-    tasks: Array.from(store.state.tasks.values()).map(t => deepClone(t)),
-    risks: Array.from(store.state.risks.values()).map(r => deepClone(r)),
-    resources: Array.from(store.state.resources.values()).map(r => deepClone(r)),
-    filters: deepClone(store.state.filters),
-    selectedProjectId: store.state.selectedProjectId,
-    view: store.state.view,
-  };
-}
-
-/**
- * Restore a Store's data from a snapshot.
- * Clears existing data first, then re-inserts.
- */
-function restoreState(store, snapshot) {
-  store.batch(() => {
-    // Clear current data
-    for (const id of [...store.state.projects.keys()]) {
-      store._projects.delete(id);
-    }
-    for (const id of [...store.state.tasks.keys()]) {
-      store._tasks.delete(id);
-    }
-    for (const id of [...store.state.risks.keys()]) {
-      store._risks.delete(id);
-    }
-    for (const id of [...store.state.resources.keys()]) {
-      store._resources.delete(id);
-    }
-
-    // Restore from snapshot
-    for (const p of (snapshot.projects || [])) {
-      store._projects.set(p.id, deepClone(p));
-    }
-    for (const t of (snapshot.tasks || [])) {
-      store._tasks.set(t.id, deepClone(t));
-    }
-    for (const r of (snapshot.risks || [])) {
-      store._risks.set(r.id, deepClone(r));
-    }
-    for (const res of (snapshot.resources || [])) {
-      store._resources.set(res.id, deepClone(res));
-    }
-
-    // Restore filter/view state
-    if (snapshot.filters) {
-      store._filters = deepClone(snapshot.filters);
-    }
-    if (snapshot.selectedProjectId !== undefined) {
-      store._selectedProjectId = snapshot.selectedProjectId;
-    }
-    if (snapshot.view) {
-      store._view = snapshot.view;
-    }
-  });
 }
 
 /**
@@ -184,7 +122,7 @@ export class HistoryManager {
       // Skip if we're currently restoring state (avoid feedback loop)
       if (this._restoring) return;
 
-      // Only capture on data-mutating events, not on filter/view changes
+      // Only capture on data-mutating events, not on filter/view/restore changes
       const mutatingTypes = new Set(['project', 'task', 'risk', 'resource', 'batch']);
       if (!mutatingTypes.has(event.type)) return;
 
@@ -227,7 +165,7 @@ export class HistoryManager {
    * @param {string} description - human-readable label for this state
    */
   push(description) {
-    const snapshot = snapshotState(this._store);
+    const snapshot = this._store.getSnapshot();
 
     // Skip if identical to the last snapshot (avoids noise in history)
     if (!snapshotsDiffer(this._lastSnapshot, snapshot)) {
@@ -254,13 +192,62 @@ export class HistoryManager {
   }
 
   /**
+   * Capture the current state as a pre-operation checkpoint.
+   * Unlike push(), this does NOT clear the redo stack.
+   * Use this before import operations to ensure the pre-import
+   * state is captured for undo regardless of debounce timing.
+   * @param {string} description - human-readable label for this state
+   */
+  checkpoint(description) {
+    // Flush any pending debounced auto-capture
+    if (this._debounceTimer) {
+      clearTimeout(this._debounceTimer);
+      this._debounceTimer = null;
+    }
+
+    const snapshot = this._store.getSnapshot();
+
+    // Only push if different from last snapshot
+    if (snapshotsDiffer(this._lastSnapshot, snapshot)) {
+      this._undoStack.push({
+        description: description || 'Checkpoint',
+        timestamp: Date.now(),
+        snapshot: deepClone(snapshot),
+      });
+
+      while (this._undoStack.length > this._maxSize + 1) {
+        this._undoStack.shift();
+      }
+
+      this._lastSnapshot = snapshot;
+    }
+  }
+
+  /**
    * Undo: revert to the previous state.
+   * Uses store.restoreFromSnapshot() to ensure all engine caches
+   * are properly invalidated.
    * Returns { success, description }.
    */
   undo() {
     // We need at least 2 entries: current state + one previous
     if (this._undoStack.length < 2) {
       return { success: false, description: 'Nothing to undo' };
+    }
+
+    // Flush any pending debounced auto-capture so we don't lose state
+    if (this._debounceTimer) {
+      clearTimeout(this._debounceTimer);
+      this._debounceTimer = null;
+      // Capture current state before undoing
+      const currentSnap = this._store.getSnapshot();
+      if (snapshotsDiffer(this._lastSnapshot, currentSnap)) {
+        this._undoStack.push({
+          description: 'Auto-captured before undo',
+          timestamp: Date.now(),
+          snapshot: deepClone(currentSnap),
+        });
+      }
     }
 
     // Pop current state onto redo stack
@@ -270,11 +257,12 @@ export class HistoryManager {
     // The new "current" is now the top of the undo stack
     const previous = this._undoStack[this._undoStack.length - 1];
 
-    // Restore previous state
+    // Restore previous state using the Store's atomic restore method
+    // which emits a 'restore' event to invalidate ALL engine caches
     this._restoring = true;
     try {
-      restoreState(this._store, previous.snapshot);
-      this._lastSnapshot = snapshotState(this._store);
+      this._store.restoreFromSnapshot(previous.snapshot);
+      this._lastSnapshot = this._store.getSnapshot();
     } finally {
       this._restoring = false;
     }
@@ -284,6 +272,8 @@ export class HistoryManager {
 
   /**
    * Redo: re-apply a previously undone state.
+   * Uses store.restoreFromSnapshot() to ensure all engine caches
+   * are properly invalidated.
    * Returns { success, description }.
    */
   redo() {
@@ -298,8 +288,8 @@ export class HistoryManager {
     // Restore the entry's state
     this._restoring = true;
     try {
-      restoreState(this._store, entry.snapshot);
-      this._lastSnapshot = snapshotState(this._store);
+      this._store.restoreFromSnapshot(entry.snapshot);
+      this._lastSnapshot = this._store.getSnapshot();
     } finally {
       this._restoring = false;
     }
@@ -340,7 +330,7 @@ export class HistoryManager {
    * Clear all history.  The current state becomes the only entry.
    */
   clear() {
-    const snapshot = snapshotState(this._store);
+    const snapshot = this._store.getSnapshot();
     this._undoStack = [{
       description: 'Cleared history',
       timestamp: Date.now(),
@@ -378,8 +368,8 @@ export class HistoryManager {
     const target = this._undoStack[this._undoStack.length - 1];
     this._restoring = true;
     try {
-      restoreState(this._store, target.snapshot);
-      this._lastSnapshot = snapshotState(this._store);
+      this._store.restoreFromSnapshot(target.snapshot);
+      this._lastSnapshot = this._store.getSnapshot();
     } finally {
       this._restoring = false;
     }

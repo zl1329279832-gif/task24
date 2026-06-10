@@ -91,6 +91,13 @@ export class Store {
     /** Batch queue -- null when not batching */
     this._batchQueue = null;
 
+    /**
+     * Monotonically increasing version counter.
+     * Incremented on every data-mutating operation so that engines and
+     * the worker can detect stale results.
+     */
+    this._stateVersion = 0;
+
     /** Expose a reactive `state` proxy for convenient reads */
     this.state = this._buildStateProxy();
   }
@@ -112,6 +119,7 @@ export class Store {
           case 'selectedProjectId': return self._selectedProjectId;
           case 'view':      return self._view;
           case 'scenarios': return [...self._scenarios];
+          case 'version':   return self._stateVersion;
           default:          return undefined;
         }
       },
@@ -204,6 +212,7 @@ export class Store {
     p.endDate = p.endDate || null;
     p.color = p.color || '#4A90D9';
     this._projects.set(p.id, p);
+    this._stateVersion++;
     this._emit({ type: 'project', path: 'add', value: deepClone(p) });
   }
 
@@ -212,6 +221,7 @@ export class Store {
     if (!existing) return;
     const merged = { ...existing, ...deepClone(changes), id }; // id is immutable
     this._projects.set(id, merged);
+    this._stateVersion++;
     this._emit({ type: 'project', path: 'update', value: deepClone(merged) });
   }
 
@@ -226,6 +236,7 @@ export class Store {
     for (const [rid, r] of this._risks) {
       if (r.projectId === id) this._risks.delete(r.id);
     }
+    this._stateVersion++;
     this._emit({ type: 'project', path: 'remove', value: deepClone(removed) });
   }
 
@@ -252,6 +263,7 @@ export class Store {
     t.estimatedDays = t.estimatedDays ?? 0;
     t.priority = t.priority ?? 3;
     this._tasks.set(t.id, t);
+    this._stateVersion++;
     this._emit({ type: 'task', path: 'add', value: deepClone(t) });
   }
 
@@ -260,6 +272,7 @@ export class Store {
     if (!existing) return;
     const merged = { ...existing, ...deepClone(changes), id };
     this._tasks.set(id, merged);
+    this._stateVersion++;
     this._emit({ type: 'task', path: 'update', value: deepClone(merged) });
   }
 
@@ -277,6 +290,7 @@ export class Store {
     for (const [rid, r] of this._risks) {
       if (r.taskId === id) this._risks.delete(rid);
     }
+    this._stateVersion++;
     this._emit({ type: 'task', path: 'remove', value: deepClone(removed) });
   }
 
@@ -296,6 +310,7 @@ export class Store {
       ? (newEnd instanceof Date ? newEnd.toISOString().slice(0, 10) : newEnd)
       : existing.plannedEnd;
     this._tasks.set(id, existing);
+    this._stateVersion++;
     this._emit({
       type: 'task',
       path: 'move',
@@ -321,6 +336,7 @@ export class Store {
     r.status = r.status || 'open';
     r.owner = r.owner || '';
     this._risks.set(r.id, r);
+    this._stateVersion++;
     this._emit({ type: 'risk', path: 'add', value: deepClone(r) });
   }
 
@@ -333,6 +349,7 @@ export class Store {
       merged.level = this._autoRiskLevel(merged.probability, merged.impact);
     }
     this._risks.set(id, merged);
+    this._stateVersion++;
     this._emit({ type: 'risk', path: 'update', value: deepClone(merged) });
   }
 
@@ -340,6 +357,7 @@ export class Store {
     if (!this._risks.has(id)) return;
     const removed = this._risks.get(id);
     this._risks.delete(id);
+    this._stateVersion++;
     this._emit({ type: 'risk', path: 'remove', value: deepClone(removed) });
   }
 
@@ -364,6 +382,7 @@ export class Store {
     r.tasks = r.tasks || [];
     r.maxCapacity = r.maxCapacity ?? 100;
     this._resources.set(r.id, r);
+    this._stateVersion++;
     this._emit({ type: 'resource', path: 'add', value: deepClone(r) });
   }
 
@@ -372,6 +391,7 @@ export class Store {
     if (!existing) return;
     const merged = { ...existing, ...deepClone(changes), id };
     this._resources.set(id, merged);
+    this._stateVersion++;
     this._emit({ type: 'resource', path: 'update', value: deepClone(merged) });
   }
 
@@ -379,6 +399,7 @@ export class Store {
     if (!this._resources.has(id)) return;
     const removed = this._resources.get(id);
     this._resources.delete(id);
+    this._stateVersion++;
     this._emit({ type: 'resource', path: 'remove', value: deepClone(removed) });
   }
 
@@ -458,6 +479,87 @@ export class Store {
       risks: Array.from(this._risks.values()).map(deepClone),
       resources: Array.from(this._resources.values()).map(deepClone),
     };
+  }
+
+  // -----------------------------------------------------------------------
+  // Atomic snapshot / restore  (used by HistoryManager and export)
+  // -----------------------------------------------------------------------
+
+  /**
+   * Capture an atomic snapshot of the entire store state including the
+   * current version counter.  Snapshots are plain objects safe for
+   * structuredClone / JSON serialisation.
+   */
+  getSnapshot() {
+    return {
+      projects: Array.from(this._projects.values()).map(deepClone),
+      tasks: Array.from(this._tasks.values()).map(deepClone),
+      risks: Array.from(this._risks.values()).map(deepClone),
+      resources: Array.from(this._resources.values()).map(deepClone),
+      filters: deepClone(this._filters),
+      selectedProjectId: this._selectedProjectId,
+      view: this._view,
+      version: this._stateVersion,
+    };
+  }
+
+  /**
+   * Atomically replace internal state from a snapshot and bump the version
+   * counter.  Emits a single 'restore' event so that ALL engines and views
+   * know to invalidate caches and re-render from scratch.
+   *
+   * This is the ONLY correct way to restore state (undo/redo/scenario-load).
+   * Direct Map manipulation without emitting 'restore' will leave engines
+   * out of sync.
+   */
+  restoreFromSnapshot(snapshot) {
+    // Clear all internal maps
+    this._projects.clear();
+    this._tasks.clear();
+    this._risks.clear();
+    this._resources.clear();
+
+    // Restore data from snapshot
+    for (const p of (snapshot.projects || [])) {
+      this._projects.set(p.id, deepClone(p));
+    }
+    for (const t of (snapshot.tasks || [])) {
+      this._tasks.set(t.id, deepClone(t));
+    }
+    for (const r of (snapshot.risks || [])) {
+      this._risks.set(r.id, deepClone(r));
+    }
+    for (const res of (snapshot.resources || [])) {
+      this._resources.set(res.id, deepClone(res));
+    }
+
+    // Restore filter/view state
+    if (snapshot.filters) {
+      this._filters = deepClone(snapshot.filters);
+    }
+    if (snapshot.selectedProjectId !== undefined) {
+      this._selectedProjectId = snapshot.selectedProjectId;
+    }
+    if (snapshot.view) {
+      this._view = snapshot.view;
+    }
+
+    // Bump version so stale worker results are discarded
+    this._stateVersion++;
+
+    // Emit a dedicated 'restore' event — engines MUST listen for this
+    // to invalidate their caches.  This is emitted outside of batch()
+    // so that it is delivered synchronously and immediately.
+    const restoreEvent = {
+      type: 'restore',
+      path: 'full',
+      value: { version: this._stateVersion },
+    };
+    for (const { listener, typeFilter } of this._subscribers) {
+      if (!typeFilter || typeFilter === 'restore' || typeFilter === 'batch') {
+        try { listener(restoreEvent); } catch (e) { console.error('Store subscriber error:', e); }
+      }
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -628,18 +730,8 @@ export class Store {
     const scenario = this._scenarios[index];
     const snapshot = deepClone(scenario.snapshot);
 
-    this.batch(() => {
-      // Clear current data
-      for (const id of [...this._projects.keys()]) this._projects.delete(id);
-      for (const id of [...this._tasks.keys()]) this._tasks.delete(id);
-      for (const id of [...this._risks.keys()]) this._risks.delete(id);
-      for (const id of [...this._resources.keys()]) this._resources.delete(id);
-      // Reload from snapshot (keep IDs this time since it's a restore)
-      for (const p of (snapshot.projects || [])) this._projects.set(p.id, deepClone(p));
-      for (const t of (snapshot.tasks || [])) this._tasks.set(t.id, deepClone(t));
-      for (const r of (snapshot.risks || [])) this._risks.set(r.id, deepClone(r));
-      for (const res of (snapshot.resources || [])) this._resources.set(res.id, deepClone(res));
-    });
+    // Use restoreFromSnapshot for atomic restore with proper event emission
+    this.restoreFromSnapshot(snapshot);
 
     this._emit({ type: 'scenario', path: 'load', value: { name: scenario.name, index } });
   }

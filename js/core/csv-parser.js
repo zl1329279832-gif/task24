@@ -681,4 +681,158 @@ export class CSVParser {
         return 'id,name\n1,Sample';
     }
   }
+
+  // -----------------------------------------------------------------------
+  // Import data validation
+  // -----------------------------------------------------------------------
+
+  /**
+   * Validate parsed import data BEFORE merging into the store.
+   * Returns { warnings: string[], errors: string[] }.
+   *
+   * Checks performed:
+   *  1. Circular dependencies among imported tasks
+   *  2. Self-referencing dependencies
+   *  3. Dangling dependency references (dep ID not in imported set)
+   *  4. Cross-project deps pointing to unknown tasks
+   *  5. Resource overload (total allocation > maxCapacity)
+   *  6. Risk level consistency (prob * impact vs stated level)
+   *
+   * @param {{ projects?, tasks?, risks?, resources? }} data - parsed CSV data
+   * @param {Store} [existingStore] - optional store to check cross-refs against
+   */
+  static validateImportData(data, existingStore) {
+    const warnings = [];
+    const errors = [];
+
+    const tasks = data.tasks || [];
+    const resources = data.resources || [];
+    const risks = data.risks || [];
+    const projects = data.projects || [];
+
+    // Build lookup sets
+    const taskIds = new Set(tasks.map(t => t.id));
+    const projectIds = new Set(projects.map(p => p.id));
+
+    // Also consider existing store IDs for cross-reference validation
+    const allTaskIds = new Set(taskIds);
+    const allProjectIds = new Set(projectIds);
+    if (existingStore) {
+      for (const id of existingStore.state.tasks.keys()) allTaskIds.add(id);
+      for (const id of existingStore.state.projects.keys()) allProjectIds.add(id);
+    }
+
+    // --- 1. Self-references ---
+    for (const t of tasks) {
+      if ((t.dependencies || []).includes(t.id)) {
+        errors.push(`任务 "${t.name}" 依赖自身`);
+      }
+    }
+
+    // --- 2. Dangling dependency references ---
+    for (const t of tasks) {
+      for (const depId of (t.dependencies || [])) {
+        if (!allTaskIds.has(depId)) {
+          warnings.push(`任务 "${t.name}" 依赖未知任务 "${depId}"`);
+        }
+      }
+    }
+
+    // --- 3. Cross-project deps pointing to unknown tasks ---
+    for (const t of tasks) {
+      for (const cpd of (t.crossProjectDeps || [])) {
+        if (cpd.taskId && !allTaskIds.has(cpd.taskId)) {
+          warnings.push(`任务 "${t.name}" 跨项目依赖指向未知任务 "${cpd.taskId}"`);
+        }
+        if (cpd.projectId && !allProjectIds.has(cpd.projectId)) {
+          warnings.push(`任务 "${t.name}" 跨项目依赖指向未知项目 "${cpd.projectId}"`);
+        }
+      }
+    }
+
+    // --- 4. Circular dependency detection (DFS tri-colour) ---
+    if (tasks.length > 0) {
+      const adj = new Map();
+      for (const t of tasks) {
+        const waitsFor = [];
+        for (const depId of (t.dependencies || [])) {
+          if (taskIds.has(depId)) waitsFor.push(depId);
+        }
+        for (const cpd of (t.crossProjectDeps || [])) {
+          if (cpd.taskId && taskIds.has(cpd.taskId)) waitsFor.push(cpd.taskId);
+        }
+        adj.set(t.id, waitsFor);
+      }
+
+      const color = new Map();
+      for (const id of taskIds) color.set(id, 0); // 0=white
+
+      const taskNameMap = new Map(tasks.map(t => [t.id, t.name]));
+      const cycles = [];
+
+      const dfs = (nodeId, path) => {
+        color.set(nodeId, 1); // gray
+        path.push(nodeId);
+        for (const next of (adj.get(nodeId) || [])) {
+          if (color.get(next) === 1) {
+            const cycleStart = path.indexOf(next);
+            if (cycleStart !== -1) {
+              const cycle = path.slice(cycleStart);
+              const names = cycle.map(id => taskNameMap.get(id) || id);
+              cycles.push(names);
+            }
+          } else if (color.get(next) === 0) {
+            dfs(next, path);
+          }
+        }
+        path.pop();
+        color.set(nodeId, 2); // black
+      };
+
+      for (const id of taskIds) {
+        if (color.get(id) === 0) dfs(id, []);
+      }
+
+      for (const cycle of cycles) {
+        errors.push(`检测到循环依赖: ${cycle.join(' → ')} → ${cycle[0]}`);
+      }
+    }
+
+    // --- 5. Resource overload ---
+    if (resources.length > 0) {
+      // Group allocations by resource name (CSV may have multiple rows per resource)
+      const resourceAllocs = new Map();
+      for (const r of resources) {
+        const key = r.name || r.id;
+        if (!resourceAllocs.has(key)) {
+          resourceAllocs.set(key, { maxCapacity: r.maxCapacity || 100, total: 0 });
+        }
+        const entry = resourceAllocs.get(key);
+        const taskAlloc = (r.tasks || []).reduce((sum, rt) => sum + (rt.allocation || 0), 0);
+        entry.total += taskAlloc;
+      }
+
+      for (const [name, info] of resourceAllocs) {
+        if (info.total > info.maxCapacity) {
+          warnings.push(`资源 "${name}" 总分配 ${info.total}% 超过最大产能 ${info.maxCapacity}%`);
+        }
+      }
+    }
+
+    // --- 6. Risk level consistency ---
+    for (const r of risks) {
+      const expectedScore = (r.probability || 3) * (r.impact || 3);
+      let expectedLevel;
+      if (expectedScore >= 20) expectedLevel = 'critical';
+      else if (expectedScore >= 12) expectedLevel = 'high';
+      else if (expectedScore >= 6) expectedLevel = 'medium';
+      else expectedLevel = 'low';
+
+      if (r.level && r.level !== expectedLevel) {
+        warnings.push(`风险 "${r.name}" 等级 "${r.level}" 与概率×影响计算结果 "${expectedLevel}" 不一致`);
+      }
+    }
+
+    return { warnings, errors };
+  }
 }
