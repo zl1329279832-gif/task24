@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>多项目进度风险管理系统</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <header class="app-header">
+        <div class="header-left">
+            <h1>多项目进度风险管理系统</h1>
+        </div>
+        <div class="header-center">
+            <nav class="view-tabs">
+                <button class="tab-btn active" data-view="gantt">甘特图</button>
+                <button class="tab-btn" data-view="milestone">里程碑</button>
+                <button class="tab-btn" data-view="heatmap">延期热力图</button>
+                <button class="tab-btn" data-view="resource">资源冲突</button>
+                <button class="tab-btn" data-view="risk">风险矩阵</button>
+            </nav>
+        </div>
+        <div class="header-right">
+            <button id="btn-undo" class="icon-btn" title="撤销 (Ctrl+Z)" disabled>↩</button>
+            <button id="btn-redo" class="icon-btn" title="重做 (Ctrl+Y)" disabled>↪</button>
+            <button id="btn-import" class="icon-btn" title="导入CSV">📂</button>
+            <button id="btn-save" class="icon-btn" title="保存方案">💾</button>
+            <button id="btn-load" class="icon-btn" title="加载方案">📋</button>
+            <button id="btn-export" class="icon-btn" title="导出报告">📊</button>
+        </div>
+    </header>
+
+    <div class="filter-bar">
+        <div class="filter-group">
+            <label>部门</label>
+            <select id="filter-dept" multiple><option value="">全部</option></select>
+        </div>
+        <div class="filter-group">
+            <label>项目经理</label>
+            <select id="filter-pm" multiple><option value="">全部</option></select>
+        </div>
+        <div class="filter-group">
+            <label>状态</label>
+            <select id="filter-status">
+                <option value="">全部</option>
+                <option value="not_started">未开始</option>
+                <option value="in_progress">进行中</option>
+                <option value="completed">已完成</option>
+                <option value="delayed">已延期</option>
+            </select>
+        </div>
+        <div class="filter-group">
+            <label>风险等级</label>
+            <select id="filter-risk">
+                <option value="">全部</option>
+                <option value="high">高</option>
+                <option value="medium">中</option>
+                <option value="low">低</option>
+            </select>
+        </div>
+        <div class="filter-group">
+            <label>项目</label>
+            <select id="filter-project"><option value="">全部</option></select>
+        </div>
+        <button id="btn-clear-filters" class="filter-clear">清除筛选</button>
+    </div>
+
+    <main class="main-content">
+        <!-- Gantt View -->
+        <div id="view-gantt" class="view-panel active">
+            <div class="gantt-toolbar">
+                <button class="zoom-btn" data-zoom="day">日</button>
+                <button class="zoom-btn active" data-zoom="week">周</button>
+                <button class="zoom-btn" data-zoom="month">月</button>
+                <button id="btn-today" class="zoom-btn">今天</button>
+                <label class="cp-toggle"><input type="checkbox" id="show-critical-path" checked> 显示关键路径</label>
+            </div>
+            <div class="gantt-container">
+                <div class="gantt-sidebar" id="gantt-sidebar"></div>
+                <div class="gantt-chart-wrapper" id="gantt-chart-wrapper">
+                    <svg id="gantt-svg" class="gantt-svg"></svg>
+                </div>
+            </div>
+        </div>
+
+        <!-- Milestone View -->
+        <div id="view-milestone" class="view-panel">
+            <div class="milestone-container" id="milestone-container"></div>
+        </div>
+
+        <!-- Heatmap View -->
+        <div id="view-heatmap" class="view-panel">
+            <div class="heatmap-toolbar">
+                <label>分组方式：</label>
+                <select id="heatmap-group">
+                    <option value="project">按项目</option>
+                    <option value="person">按负责人</option>
+                    <option value="dept">按部门</option>
+                </select>
+            </div>
+            <canvas id="heatmap-canvas" class="heatmap-canvas"></canvas>
+            <div id="heatmap-tooltip" class="heatmap-tooltip"></div>
+        </div>
+
+        <!-- Resource View -->
+        <div id="view-resource" class="view-panel">
+            <div class="resource-container" id="resource-container"></div>
+        </div>
+
+        <!-- Risk Matrix View -->
+        <div id="view-risk" class="view-panel">
+            <div class="risk-container" id="risk-container"></div>
+        </div>
+    </main>
+
+    <!-- Import Modal -->
+    <div id="modal-import" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>导入CSV数据</h2>
+                <button class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="import-section">
+                    <h3>项目与任务数据</h3>
+                    <p class="import-hint">格式：项目ID,项目名,任务ID,任务名,负责人,部门,计划开始,计划结束,实际开始,实际结束,状态,前置任务(多个用;分隔),里程碑(Y/N),人力投入(%)</p>
+                    <input type="file" id="file-tasks" accept=".csv" class="file-input">
+                    <textarea id="text-tasks" class="csv-textarea" placeholder="或直接粘贴CSV数据..."></textarea>
+                </div>
+                <div class="import-section">
+                    <h3>风险数据</h3>
+                    <p class="import-hint">格式：风险ID,项目ID,描述,概率(1-5),影响(1-5),责任人,缓解措施,状态</p>
+                    <input type="file" id="file-risks" accept=".csv" class="file-input">
+                    <textarea id="text-risks" class="csv-textarea" placeholder="或直接粘贴CSV数据..."></textarea>
+                </div>
+                <div class="import-section">
+                    <h3>资源投入数据</h3>
+                    <p class="import-hint">格式：人员,部门,项目ID,任务ID,投入百分比,开始日期,结束日期</p>
+                    <input type="file" id="file-resources" accept=".csv" class="file-input">
+                    <textarea id="text-resources" class="csv-textarea" placeholder="或直接粘贴CSV数据..."></textarea>
+                </div>
+                <div class="import-options">
+                    <label><input type="checkbox" id="import-merge" checked> 合并到现有数据</label>
+                    <label><input type="checkbox" id="import-validate" checked> 导入前校验</label>
+                </div>
+                <div id="import-errors" class="import-errors hidden"></div>
+            </div>
+            <div class="modal-footer">
+                <button id="btn-load-sample" class="btn btn-secondary">加载示例数据</button>
+                <button id="btn-do-import" class="btn btn-primary">导入</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Save/Load Modal -->
+    <div id="modal-save" class="modal hidden">
+        <div class="modal-content modal-sm">
+            <div class="modal-header">
+                <h2 id="save-modal-title">保存方案</h2>
+                <button class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="save-form">
+                    <input type="text" id="save-name" placeholder="方案名称" class="input-full">
+                    <button id="btn-do-save" class="btn btn-primary" style="margin-top:10px">保存</button>
+                </div>
+                <div id="load-list" class="load-list hidden"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast -->
+    <div id="toast-container" class="toast-container"></div>
+
+    <script src="js/utils.js"></script>
+    <script src="js/csv-parser.js"></script>
+    <script src="js/data-model.js"></script>
+    <script src="js/scheduler.js"></script>
+    <script src="js/history.js"></script>
+    <script src="js/gantt.js"></script>
+    <script src="js/milestone.js"></script>
+    <script src="js/heatmap.js"></script>
+    <script src="js/resource.js"></script>
+    <script src="js/risk-matrix.js"></script>
+    <script src="js/export.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>
