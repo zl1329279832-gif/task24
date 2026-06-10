@@ -2462,3 +2462,301 @@ input, select, textarea {
 #view-container > * {
   animation: fadeIn 200ms ease;
 }
+
+/* ==========================================================================
+   22. Baseline & Change Impact Styles
+   ========================================================================== */
+
+/* -- Gantt baseline bars -------------------------------------------------- */
+.gantt-baseline-bar {
+  pointer-events: none;
+}
+
+/* -- Toolbar baseline section --------------------------------------------- */
+.toolbar-baseline {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.toolbar-baseline-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 4px;
+}
+
+.toolbar-baseline-menu {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 100;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+  min-width: 280px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.toolbar-baseline-item {
+  padding: 8px 10px;
+  border-radius: 6px;
+  margin-bottom: 2px;
+  border: 1px solid transparent;
+}
+
+.toolbar-baseline-item:hover {
+  background: #f8fafc;
+}
+
+.toolbar-baseline-item--active {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+}
+
+.toolbar-baseline-item-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.toolbar-baseline-radio {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.toolbar-baseline-radio input[type="radio"] {
+  margin: 0;
+  cursor: pointer;
+}
+
+.toolbar-baseline-name {
+  font-weight: 500;
+  color: #1e293b;
+}
+
+.toolbar-baseline-date {
+  font-size: 0.75rem;
+  color: #94a3b8;
+}
+
+.toolbar-baseline-actions-row {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+  padding-left: 22px;
+}
+
+.toolbar-baseline-action {
+  font-size: 0.72rem;
+  padding: 2px 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 4px;
+  background: #f8fafc;
+  color: #475569;
+  cursor: pointer;
+}
+
+.toolbar-baseline-action:hover {
+  background: #e2e8f0;
+}
+
+.toolbar-baseline-action--danger {
+  color: #dc2626;
+  border-color: #fecaca;
+}
+
+.toolbar-baseline-action--danger:hover {
+  background: #fee2e2;
+}
+
+.toolbar-baseline-badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 12px;
+  background: #dbeafe;
+  color: #1e40af;
+  font-size: 0.78rem;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.toolbar-baseline-badge:hover {
+  background: #bfdbfe;
+}
+
+.toolbar-baseline-indicator {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 4px;
+}
+
+.toolbar-menu-empty {
+  padding: 12px;
+  text-align: center;
+  color: #94a3b8;
+  font-size: 0.85rem;
+}
+
+/* -- Risk escalation markers ---------------------------------------------- */
+.risk-escalation-marker,
+.risk-deescalation-marker {
+  pointer-events: none;
+}
+
+.risk-baseline-compare {
+  margin-top: 12px;
+  padding: 10px;
+  background: #f0f9ff;
+  border: 1px solid #bae6fd;
+  border-radius: 6px;
+}
+
+/* -- Resource overload section -------------------------------------------- */
+.resource-overload-section {
+  margin-top: 12px;
+  padding: 10px;
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 6px;
+}
+
+.resource-overload-bar {
+  display: flex;
+  height: 14px;
+  border-radius: 7px;
+  overflow: hidden;
+  margin: 6px 0;
+  background: #f1f5f9;
+}
+
+.resource-overload-segment {
+  min-width: 2px;
+  transition: width 0.3s ease;
+}
+
+.resource-overload-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 0.75rem;
+  color: #475569;
+  margin-top: 4px;
+}
+
+.resource-overload-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.resource-overload-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.resource-baseline-compare {
+  margin-top: 8px;
+  padding: 6px 10px;
+  background: #f0f9ff;
+  border: 1px solid #bae6fd;
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+
+/* -- Impact analysis modal ------------------------------------------------ */
+.impact-modal {
+  max-width: 800px;
+  max-height: 75vh;
+  overflow-y: auto;
+}
+
+.impact-modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.impact-modal-header h3 {
+  margin: 0;
+  color: #1e293b;
+}
+
+.impact-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px;
+  margin-bottom: 20px;
+}
+
+.impact-card {
+  text-align: center;
+  padding: 12px 8px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+
+.impact-card-value {
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: #1e40af;
+}
+
+.impact-card-value.impact-warn {
+  color: #d97706;
+}
+
+.impact-card-value.impact-danger {
+  color: #dc2626;
+}
+
+.impact-card-label {
+  font-size: 0.78rem;
+  color: #64748b;
+  margin-top: 2px;
+}
+
+.impact-modal h4 {
+  margin: 16px 0 8px;
+  color: #334155;
+  font-size: 0.95rem;
+  border-bottom: 1px solid #e2e8f0;
+  padding-bottom: 4px;
+}
+
+.impact-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+  margin-bottom: 12px;
+}
+
+.impact-table th,
+.impact-table td {
+  border: 1px solid #e2e8f0;
+  padding: 6px 10px;
+  text-align: left;
+}
+
+.impact-table th {
+  background: #f1f5f9;
+  font-weight: 600;
+  color: #334155;
+}
+
+.impact-table tr:nth-child(even) {
+  background: #fafafa;
+}

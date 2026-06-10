@@ -15,6 +15,7 @@ export class ResourceView {
     this.container = container;
     this.store = store;
     this.resEngine = optionsOrEngine?.resourceEngine || optionsOrEngine;
+    this.baselineManager = optionsOrEngine?.baselineManager || null;
 
     this._listeners = [];
     this._unsubscribe = null;
@@ -180,10 +181,59 @@ export class ResourceView {
     // Sort by planned start
     tasks.sort((a, b) => new Date(a.task.plannedStart) - new Date(b.task.plannedStart));
 
+    const totalAlloc = tasks.reduce((s, t) => s + (t.allocation || 0), 0);
+
+    // Overload source breakdown
+    let overloadSection = '';
+    if (totalAlloc > resource.maxCapacity) {
+      const excess = totalAlloc - resource.maxCapacity;
+      const sortedTasks = [...tasks].sort((a, b) => b.allocation - a.allocation);
+      const barSegments = sortedTasks.map((t) => {
+        const pct = Math.round((t.allocation / totalAlloc) * 100);
+        const colors = ['#3b82f6', '#e67e22', '#22c55e', '#8b5cf6', '#ef4444', '#eab308'];
+        const colorIdx = sortedTasks.indexOf(t) % colors.length;
+        return `<div class="resource-overload-segment" style="width:${pct}%;background:${colors[colorIdx]}" title="${t.task.name}: ${t.allocation}%"></div>`;
+      }).join('');
+
+      overloadSection = `
+        <div class="resource-overload-section">
+          <h5 class="resource-section-title">Overload Sources (${totalAlloc}% / ${resource.maxCapacity}%, +${excess}%)</h5>
+          <div class="resource-overload-bar">${barSegments}</div>
+          <div class="resource-overload-legend">
+            ${sortedTasks.map((t, i) => {
+              const colors = ['#3b82f6', '#e67e22', '#22c55e', '#8b5cf6', '#ef4444', '#eab308'];
+              return `<span class="resource-overload-legend-item"><span class="resource-overload-dot" style="background:${colors[i % colors.length]}"></span>${t.task.name}: ${t.allocation}%</span>`;
+            }).join('')}
+          </div>
+        </div>
+      `;
+    }
+
+    // Baseline comparison
+    let baselineSection = '';
+    const baseline = this.baselineManager?.getActiveBaseline?.();
+    if (baseline) {
+      const baselineResource = (baseline.resources || []).find(r => r.id === resource.id);
+      if (baselineResource) {
+        const baseAlloc = (baselineResource.tasks || []).reduce((s, t) => s + (t.allocation || 0), 0);
+        const delta = totalAlloc - baseAlloc;
+        const deltaColor = delta > 0 ? '#dc2626' : delta < 0 ? '#16a34a' : '#64748b';
+        const deltaSign = delta > 0 ? '+' : '';
+        baselineSection = `
+          <div class="resource-baseline-compare">
+            <strong>vs Baseline:</strong>
+            <span style="color:${deltaColor};font-weight:600;margin-left:8px">${baseAlloc}% &rarr; ${totalAlloc}% (${deltaSign}${delta}%)</span>
+          </div>
+        `;
+      }
+    }
+
     panel.innerHTML = `
       <h4 class="resource-detail-title">${resource.name} &mdash; ${resource.role || ''}</h4>
       <div class="resource-detail-dept">${resource.department || ''}</div>
-      <div class="resource-detail-capacity">Max capacity: ${resource.maxCapacity}%</div>
+      <div class="resource-detail-capacity">Max capacity: ${resource.maxCapacity}% | Current: ${totalAlloc}%</div>
+      ${baselineSection}
+      ${overloadSection}
       <table class="resource-detail-table">
         <thead><tr><th>Task</th><th>Project</th><th>Allocation</th><th>Period</th></tr></thead>
         <tbody>

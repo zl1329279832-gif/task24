@@ -17,6 +17,8 @@ const STATUS_COLORS = {
 const CRITICAL_COLOR = '#ef4444';
 const TODAY_COLOR = '#ef4444';
 const CROSS_PROJECT_COLOR = '#8b5cf6';
+const BASELINE_COLOR = '#94a3b8';
+const BASELINE_BAR_H = 5;
 
 /**
  * GanttChart renders a dual-panel timeline view:
@@ -28,6 +30,7 @@ export class GanttChart {
     this.container = container;
     this.store = store;
     this.deps = optionsOrDeps?.dependencyEngine || optionsOrDeps;
+    this.baselineManager = optionsOrDeps?.baselineManager || null;
 
     // Interaction state
     this._drag = null;
@@ -53,9 +56,26 @@ export class GanttChart {
     this._projects = Array.isArray(projects) ? projects : Array.from(projects.values());
     this._tasks = Array.isArray(allTasks) ? allTasks : Array.from(allTasks.values());
     this._criticalTaskIds = this._collectCriticalTasks();
+    this._baselineTaskMap = this._buildBaselineTaskMap();
     this._computeDateRange();
     this._renderLeftPanel();
     this._renderRightPanel();
+  }
+
+  _buildBaselineTaskMap() {
+    const baseline = this.baselineManager?.getActiveBaseline?.();
+    if (!baseline) return null;
+    const map = new Map();
+    for (const t of (baseline.tasks || [])) map.set(t.id, t);
+    return map;
+  }
+
+  _daysBetween(dateA, dateB) {
+    if (!dateA || !dateB) return 0;
+    const a = new Date(dateA).getTime();
+    const b = new Date(dateB).getTime();
+    if (isNaN(a) || isNaN(b)) return 0;
+    return Math.round((b - a) / DAY_MS);
   }
 
   destroy() {
@@ -339,6 +359,53 @@ export class GanttChart {
     const barY = y + (ROW_HEIGHT - BAR_HEIGHT) / 2;
     const isCritical = this._criticalTaskIds.has(task.id);
 
+    // -- Baseline bar (rendered first, behind the main bar) --
+    if (this._baselineTaskMap) {
+      const bt = this._baselineTaskMap.get(task.id);
+      if (bt && bt.plannedStart && bt.plannedEnd) {
+        const bx = this._dateToX(bt.plannedStart);
+        const bw = Math.max(this._dateToX(bt.plannedEnd) - bx, this._dayWidth);
+        const baseBar = document.createElementNS(ns, 'rect');
+        Object.entries({
+          x: bx, y: barY + BAR_HEIGHT, width: bw, height: BASELINE_BAR_H,
+          rx: 2, ry: 2,
+          fill: BASELINE_COLOR, opacity: 0.45,
+          stroke: '#64748b', 'stroke-dasharray': '3 2', 'stroke-width': 0.5,
+        }).forEach(([k, v]) => baseBar.setAttribute(k, v));
+        baseBar.classList.add('gantt-baseline-bar');
+        svg.appendChild(baseBar);
+
+        // Delay connector line if current end differs from baseline end
+        const delayDays = this._daysBetween(bt.plannedEnd, task.plannedEnd);
+        if (Math.abs(delayDays) > 0) {
+          const bEndX = this._dateToX(bt.plannedEnd);
+          const cEndX = this._dateToX(task.plannedEnd);
+          const connY = barY + BAR_HEIGHT;
+          const connector = document.createElementNS(ns, 'line');
+          Object.entries({
+            x1: bEndX, y1: connY + BASELINE_BAR_H / 2,
+            x2: cEndX, y2: connY + BASELINE_BAR_H / 2,
+            stroke: delayDays > 0 ? '#ef4444' : '#22c55e',
+            'stroke-width': 1.5,
+            'stroke-dasharray': '2 2',
+          }).forEach(([k, v]) => connector.setAttribute(k, v));
+          svg.appendChild(connector);
+
+          // Delay label
+          const labelX = (bEndX + cEndX) / 2;
+          const label = document.createElementNS(ns, 'text');
+          label.setAttribute('x', labelX);
+          label.setAttribute('y', connY + BASELINE_BAR_H + 10);
+          label.setAttribute('text-anchor', 'middle');
+          label.setAttribute('font-size', '9');
+          label.setAttribute('fill', delayDays > 0 ? '#dc2626' : '#16a34a');
+          label.setAttribute('font-weight', 'bold');
+          label.textContent = (delayDays > 0 ? '+' : '') + delayDays + 'd';
+          svg.appendChild(label);
+        }
+      }
+    }
+
     if (task.isMilestone) {
       // Diamond shape for milestones
       const cx = x + this._dayWidth / 2;
@@ -483,6 +550,26 @@ export class GanttChart {
       const y = idx * ROW_HEIGHT + (ROW_HEIGHT - BAR_HEIGHT) / 2;
       const isCritical = this._criticalTaskIds.has(t.id);
 
+      // Baseline bar (canvas fallback)
+      if (this._baselineTaskMap) {
+        const bt = this._baselineTaskMap.get(t.id);
+        if (bt && bt.plannedStart && bt.plannedEnd) {
+          const bx = this._dateToX(bt.plannedStart);
+          const bw = Math.max(this._dateToX(bt.plannedEnd) - bx, this._dayWidth);
+          ctx.fillStyle = BASELINE_COLOR;
+          ctx.globalAlpha = 0.45;
+          this._roundRect(ctx, bx, y + BAR_HEIGHT, bw, BASELINE_BAR_H, 2);
+          ctx.fill();
+          ctx.globalAlpha = 1;
+          ctx.strokeStyle = '#64748b';
+          ctx.lineWidth = 0.5;
+          ctx.setLineDash([3, 2]);
+          this._roundRect(ctx, bx, y + BAR_HEIGHT, bw, BASELINE_BAR_H, 2);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+      }
+
       ctx.fillStyle = STATUS_COLORS[t.status] || row.project.color;
       ctx.globalAlpha = t.status === 'not-started' ? 0.6 : 1;
       this._roundRect(ctx, x, y, w, BAR_HEIGHT, 4);
@@ -600,6 +687,20 @@ export class GanttChart {
     const tip = this._els.tooltip;
     const status = task.status || 'unknown';
     const progress = task.progress != null ? task.progress + '%' : 'N/A';
+    let baselineInfo = '';
+    if (this._baselineTaskMap) {
+      const bt = this._baselineTaskMap.get(task.id);
+      if (bt) {
+        const delay = this._daysBetween(bt.plannedEnd, task.plannedEnd);
+        const delayColor = delay > 0 ? '#dc2626' : delay < 0 ? '#16a34a' : '#64748b';
+        const delayText = delay > 0 ? `+${delay} days` : delay < 0 ? `${delay} days` : 'On track';
+        baselineInfo = `
+          <hr style="margin:4px 0;border:none;border-top:1px solid #e2e8f0"/>
+          <span style="color:#64748b">Baseline:</span> ${new Date(bt.plannedStart).toLocaleDateString()} ~ ${new Date(bt.plannedEnd).toLocaleDateString()}<br/>
+          <span style="color:${delayColor};font-weight:bold">Delay: ${delayText}</span>
+        `;
+      }
+    }
     tip.innerHTML = `
       <strong>${task.name}</strong><br/>
       Status: ${status} &bull; Progress: ${progress}<br/>
@@ -607,6 +708,7 @@ export class GanttChart {
       End: ${new Date(task.plannedEnd).toLocaleDateString()}<br/>
       Assignee: ${task.assignee || 'Unassigned'}<br/>
       Priority: ${task.priority || 'N/A'}
+      ${baselineInfo}
     `;
     tip.style.display = 'block';
     tip.style.left = e.clientX + 12 + 'px';

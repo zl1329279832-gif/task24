@@ -17,6 +17,7 @@ const BG_COLORS = [
 
 const PROB_LABELS = ['Rare', 'Unlikely', 'Possible', 'Likely', 'Almost Certain'];
 const IMPACT_LABELS = ['Negligible', 'Minor', 'Moderate', 'Major', 'Critical'];
+const RISK_LEVEL_ORDER = { low: 0, medium: 1, high: 2, critical: 3 };
 
 /**
  * RiskMatrix renders a 5x5 SVG grid where each cell is colored by severity.
@@ -28,6 +29,7 @@ export class RiskMatrix {
     this.container = container;
     this.store = store;
     this.riskEngine = optionsOrEngine?.riskEngine || optionsOrEngine;
+    this.baselineManager = optionsOrEngine?.baselineManager || null;
 
     this._listeners = [];
     this._unsubscribe = null;
@@ -154,6 +156,14 @@ export class RiskMatrix {
       risks = risks.filter((r) => r.projectId === this._filterProject);
     }
 
+    // Build baseline risk map for escalation detection
+    const baseline = this.baselineManager?.getActiveBaseline?.();
+    const baselineRiskMap = new Map();
+    if (baseline) {
+      for (const r of (baseline.risks || [])) baselineRiskMap.set(r.id, r);
+    }
+    this._baselineRiskMap = baselineRiskMap;
+
     // Build cell counts
     const cellCounts = Array.from({ length: MATRIX_SIZE }, () => Array(MATRIX_SIZE).fill(0));
     const cellRisks = Array.from({ length: MATRIX_SIZE }, () => Array.from({ length: MATRIX_SIZE }, () => []));
@@ -261,6 +271,43 @@ export class RiskMatrix {
           cl.setAttribute('font-weight', 'bold');
           cl.textContent = count;
           svg.appendChild(cl);
+
+          // Escalation markers — check if any risk in this cell escalated
+          if (baselineRiskMap.size > 0) {
+            let escalatedCount = 0;
+            let deescalatedCount = 0;
+            for (const risk of cellRisks[probIdx][ii]) {
+              const baseRisk = baselineRiskMap.get(risk.id);
+              if (baseRisk) {
+                const bLevel = RISK_LEVEL_ORDER[baseRisk.level] ?? 0;
+                const cLevel = RISK_LEVEL_ORDER[risk.level] ?? 0;
+                if (cLevel > bLevel) escalatedCount++;
+                else if (cLevel < bLevel) deescalatedCount++;
+              }
+            }
+            if (escalatedCount > 0) {
+              // Red upward triangle
+              const tx = cx + CELL_SIZE / 2 + r + 3;
+              const ty = cy + CELL_SIZE / 2 - 6;
+              const tri = document.createElementNS(ns, 'polygon');
+              tri.setAttribute('points', `${tx},${ty} ${tx + 5},${ty + 8} ${tx - 5},${ty + 8}`);
+              tri.setAttribute('fill', '#ef4444');
+              tri.classList.add('risk-escalation-marker');
+              tri.style.pointerEvents = 'none';
+              svg.appendChild(tri);
+            }
+            if (deescalatedCount > 0) {
+              // Green downward triangle
+              const tx = cx + CELL_SIZE / 2 + r + 3;
+              const ty = cy + CELL_SIZE / 2 + 6;
+              const tri = document.createElementNS(ns, 'polygon');
+              tri.setAttribute('points', `${tx - 5},${ty - 8} ${tx + 5},${ty - 8} ${tx},${ty}`);
+              tri.setAttribute('fill', '#22c55e');
+              tri.classList.add('risk-deescalation-marker');
+              tri.style.pointerEvents = 'none';
+              svg.appendChild(tri);
+            }
+          }
         }
       }
     }
@@ -331,6 +378,27 @@ export class RiskMatrix {
     if (!risk) { panel.innerHTML = ''; return; }
 
     const project = this.store.state.projects.get(risk.projectId);
+
+    // Baseline comparison
+    let baselineSection = '';
+    const baseRisk = this._baselineRiskMap?.get(risk.id);
+    if (baseRisk) {
+      const bLevel = RISK_LEVEL_ORDER[baseRisk.level] ?? 0;
+      const cLevel = RISK_LEVEL_ORDER[risk.level] ?? 0;
+      const changeDir = cLevel > bLevel ? 'Escalated' : cLevel < bLevel ? 'De-escalated' : 'Unchanged';
+      const changeColor = cLevel > bLevel ? '#dc2626' : cLevel < bLevel ? '#16a34a' : '#64748b';
+      baselineSection = `
+        <div class="risk-detail-section risk-baseline-compare">
+          <strong>vs Baseline:</strong>
+          <div class="risk-detail-grid" style="margin-top:4px">
+            <div class="risk-detail-label">Level</div><div><span class="risk-level--${baseRisk.level}">${baseRisk.level}</span> &rarr; <span class="risk-level--${risk.level}">${risk.level}</span></div>
+            <div class="risk-detail-label">P &times; I</div><div>${baseRisk.probability}&times;${baseRisk.impact} &rarr; ${risk.probability}&times;${risk.impact}</div>
+            <div class="risk-detail-label">Change</div><div style="color:${changeColor};font-weight:600">${changeDir}</div>
+          </div>
+        </div>
+      `;
+    }
+
     panel.innerHTML = `
       <h4 class="risk-detail-title">${risk.name}</h4>
       <div class="risk-detail-grid">
@@ -346,6 +414,7 @@ export class RiskMatrix {
         <strong>Mitigation:</strong>
         <p>${risk.mitigation || 'No mitigation plan defined.'}</p>
       </div>
+      ${baselineSection}
     `;
   }
 

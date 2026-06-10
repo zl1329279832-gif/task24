@@ -18,6 +18,7 @@ self.onmessage = function (e) {
   var msg = e.data;
   var id = msg.id;
   var type = msg.type;
+  var version = msg.version || 0;
   var payload = msg.payload || {};
 
   // Inject the request id into the payload so compute functions can use it
@@ -48,11 +49,12 @@ self.onmessage = function (e) {
       default:
         throw new Error('Unknown message type: ' + type);
     }
-    self.postMessage({ id: id, type: type, result: result });
+    self.postMessage({ id: id, type: type, version: version, result: result });
   } catch (err) {
     self.postMessage({
       id: id,
       type: type,
+      version: version,
       error: err.message || String(err),
     });
   }

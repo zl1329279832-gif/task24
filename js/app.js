@@ -14,6 +14,10 @@ import { DependencyEngine } from './core/dependency-engine.js';
 import { ResourceEngine }   from './engine/resource-engine.js';
 import { RiskEngine }       from './engine/risk-engine.js';
 import { HistoryManager }   from './core/history-manager.js';
+import { BaselineManager }  from './core/baseline-manager.js';
+import { ChangeImpactEngine } from './engine/change-impact-engine.js';
+import { ChangeRequestManager } from './core/change-request.js';
+import { ImportValidator }  from './core/import-validator.js';
 import { GanttChart }       from './views/gantt-chart.js';
 import { MilestoneView }    from './views/milestone-view.js';
 import { ResourceView }     from './views/resource-view.js';
@@ -68,6 +72,14 @@ class App {
     this.resourceEngine   = new ResourceEngine(this.store);
     this.riskEngine       = new RiskEngine(this.store);
     this.historyManager   = new HistoryManager(this.store);
+    this.baselineManager  = new BaselineManager(this.store);
+    this.changeImpactEngine = new ChangeImpactEngine(
+      this.store, this.dependencyEngine, this.resourceEngine, this.riskEngine,
+    );
+    this.changeRequestManager = new ChangeRequestManager(
+      this.store, this.baselineManager, this.changeImpactEngine,
+    );
+    this.importValidator  = new ImportValidator(this.store, this.dependencyEngine);
 
     // UI state
     this.currentView = null;   // active view instance
@@ -75,7 +87,8 @@ class App {
     this.views       = {};     // cache of instantiated views
     this.worker      = null;   // Web Worker handle
     this.workerReqId = 0;      // monotonic id for worker promise map
-    this.workerPending = new Map(); // id → { resolve, reject }
+    this.workerPending = new Map(); // id → { resolve, reject, version }
+    this._computeVersion = 0;  // monotonic version counter for stale-result prevention
 
     this.toolbar   = null;
     this.filterBar = null;
@@ -99,6 +112,11 @@ class App {
       this.store,
       this.historyManager,
       this.riskEngine,
+      {
+        baselineManager: this.baselineManager,
+        changeRequestManager: this.changeRequestManager,
+        changeImpactEngine: this.changeImpactEngine,
+      },
     );
     this.toolbar.render();
 
@@ -116,8 +134,16 @@ class App {
     // Restore persisted state (if any)
     this.loadState();
 
+    // Load baseline and change request data
+    this.baselineManager.load();
+    this.changeRequestManager.load();
+
     // Auto-save pipeline
     this.setupAutoSave();
+
+    // Auto-save baselines and change requests
+    this.baselineManager.subscribe(() => this.baselineManager.save());
+    this.changeRequestManager.subscribe(() => this.changeRequestManager.save());
 
     // Seed sample data when the store is empty
     if (this.store.state.projects.size === 0) {
@@ -142,7 +168,7 @@ class App {
     try {
       this.worker = new Worker('js/engine/worker.js', { type: 'module' });
       this.worker.onmessage = (e) => {
-        const { id, result, error, progress } = e.data;
+        const { id, result, error, progress, version } = e.data;
         const pending = this.workerPending.get(id);
         if (!pending) return;
 
@@ -151,6 +177,14 @@ class App {
         if (progress !== undefined) return;
 
         this.workerPending.delete(id);
+
+        // Discard stale results: if a newer computation was requested,
+        // this result is outdated and should not overwrite fresher data.
+        if (version !== undefined && pending.version !== undefined
+            && version < this._computeVersion) {
+          return;
+        }
+
         if (error) {
           pending.reject(new Error(error));
         } else {
@@ -173,9 +207,10 @@ class App {
   workerRequest(type, payload) {
     if (!this.worker) return Promise.resolve(null);
     const id = ++this.workerReqId;
+    const version = ++this._computeVersion;
     return new Promise((resolve, reject) => {
-      this.workerPending.set(id, { resolve, reject });
-      this.worker.postMessage({ id, type, payload });
+      this.workerPending.set(id, { resolve, reject, version });
+      this.worker.postMessage({ id, type, version, payload });
     });
   }
 
@@ -220,6 +255,18 @@ class App {
     document.addEventListener('app:save-scenario',() => { this.saveState(); this.showToast('场景已保存', 'success'); });
     document.addEventListener('app:switch-view',  (e) => this.switchView(e.detail.view));
     document.addEventListener('app:toggle-filter',() => this._toggleFilterBar());
+
+    // Toast events from toolbar/views
+    document.addEventListener('app:toast', (e) => {
+      const d = e.detail || {};
+      this.showToast(d.message || '', d.type || 'info');
+    });
+
+    // Modal events from toolbar
+    document.addEventListener('app:show-modal', (e) => {
+      const d = e.detail || {};
+      if (d.content) this.showModal(d.content);
+    });
   }
 
   /* ---------------------------------------------------------------------- */
@@ -234,15 +281,46 @@ class App {
     // Suppress history auto-capture during import so we get exactly one snapshot
     this.historyManager._restoring = true;
     const results = [];
+    const allParsed = [];
+
     try {
+      // Phase 1: Parse all files
       for (const file of files) {
         try {
           const text = await this._readFile(file);
           const data = this.csvParser.parse(text);
-          this.store.importData(data);
-          results.push({ name: file.name, rows: data.tasks?.length ?? 0, ok: true });
+          allParsed.push({ name: file.name, data, ok: true });
         } catch (err) {
           results.push({ name: file.name, error: err.message, ok: false });
+        }
+      }
+
+      // Phase 2: Validate across all files
+      if (allParsed.length > 0) {
+        const validation = this.importValidator.validateImport(
+          allParsed.map(p => p.data)
+        );
+        // Show warnings but don't block import
+        for (const warning of validation.warnings) {
+          this.showToast(warning, 'warning', 5000);
+        }
+        // Show errors — still allow import but warn
+        for (const error of validation.errors) {
+          this.showToast(`Import issue: ${error}`, 'error', 6000);
+        }
+      }
+
+      // Phase 3: Import validated data
+      for (const parsed of allParsed) {
+        try {
+          this.store.importData(parsed.data);
+          results.push({
+            name: parsed.name,
+            rows: parsed.data.tasks?.length ?? 0,
+            ok: true,
+          });
+        } catch (err) {
+          results.push({ name: parsed.name, error: err.message, ok: false });
         }
       }
     } finally {
@@ -314,6 +392,8 @@ class App {
         dependencyEngine: this.dependencyEngine,
         resourceEngine:   this.resourceEngine,
         riskEngine:       this.riskEngine,
+        baselineManager:  this.baselineManager,
+        changeImpactEngine: this.changeImpactEngine,
         workerRequest:    (t, p) => this.workerRequest(t, p),
         showToast:        (m, t) => this.showToast(m, t),
         showModal:        (c)    => this.showModal(c),
