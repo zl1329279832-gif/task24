@@ -7,6 +7,7 @@ const VIEWS = [
   { id: 'resource', label: 'Resources', icon: '\u2630' },
   { id: 'heatmap', label: 'Heatmap', icon: '\u25A6' },
   { id: 'risk', label: 'Risk Matrix', icon: '\u26A0' },
+  { id: 'baseline', label: 'Baseline', icon: '\u25A3' },
 ];
 
 /**
@@ -35,6 +36,7 @@ export class Toolbar {
     this._renderUndoRedo();
     this._renderStats();
     this._renderScenarioMenu();
+    this._renderBaselineIndicator();
   }
 
   destroy() {
@@ -293,5 +295,31 @@ export class Toolbar {
       ],
     };
     this._downloadBlob(JSON.stringify(sample, null, 2), 'sample-data.json', 'application/json');
+  }
+
+  // -- Baseline indicator --------------------------------------------------
+
+  _renderBaselineIndicator() {
+    // Find or create baseline indicator element in the view tabs area
+    let indicator = this.container.querySelector('.toolbar-baseline-indicator');
+    if (!indicator) {
+      const tabsEl = this.container.querySelector('.toolbar-view-tabs');
+      if (!tabsEl) return;
+      indicator = document.createElement('span');
+      indicator.className = 'toolbar-baseline-indicator';
+      indicator.title = 'No active baseline';
+      tabsEl.appendChild(indicator);
+    }
+
+    const activeId = this.store.state.activeBaselineId;
+    if (activeId) {
+      indicator.textContent = '●';
+      indicator.style.color = '#22c55e';
+      indicator.title = 'Active baseline set';
+    } else {
+      indicator.textContent = '○';
+      indicator.style.color = '#94a3b8';
+      indicator.title = 'No active baseline';
+    }
   }
 }

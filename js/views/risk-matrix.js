@@ -28,6 +28,7 @@ export class RiskMatrix {
     this.container = container;
     this.store = store;
     this.riskEngine = optionsOrEngine?.riskEngine || optionsOrEngine;
+    this._changeImpactEngine = optionsOrEngine?.changeImpactEngine || null;
 
     this._listeners = [];
     this._unsubscribe = null;
@@ -261,6 +262,26 @@ export class RiskMatrix {
           cl.setAttribute('font-weight', 'bold');
           cl.textContent = count;
           svg.appendChild(cl);
+
+          // Baseline upgrade marker (red triangle)
+          if (this._changeImpactEngine) {
+            const upgradedIds = this._changeImpactEngine.getUpgradedRiskIds();
+            const upgradedInCell = cellRisks[probIdx][ii].filter(r => upgradedIds.has(r.id));
+            if (upgradedInCell.length > 0) {
+              const triSize = 8;
+              const triX = cx + CELL_SIZE - triSize - 4;
+              const triY = cy + 4;
+              const triangle = document.createElementNS(ns, 'polygon');
+              triangle.setAttribute('points',
+                `${triX},${triY + triSize} ${triX + triSize},${triY + triSize} ${triX + triSize / 2},${triY}`
+              );
+              triangle.setAttribute('fill', '#ef4444');
+              triangle.setAttribute('stroke', '#fff');
+              triangle.setAttribute('stroke-width', '1');
+              triangle.style.pointerEvents = 'none';
+              svg.appendChild(triangle);
+            }
+          }
         }
       }
     }
@@ -346,7 +367,21 @@ export class RiskMatrix {
         <strong>Mitigation:</strong>
         <p>${risk.mitigation || 'No mitigation plan defined.'}</p>
       </div>
+      ${this._renderRiskBaselineComparison(risk)}
     `;
+  }
+
+  _renderRiskBaselineComparison(risk) {
+    if (!this._changeImpactEngine) return '';
+    const riskChanges = this._changeImpactEngine.getRiskChanges();
+    const change = riskChanges.find(rc => rc.riskId === risk.id);
+    if (!change || change.direction === 'unchanged') return '';
+
+    const arrow = change.direction === 'upgraded' ? '▲' : '▼';
+    const color = change.direction === 'upgraded' ? '#ef4444' : '#22c55e';
+    return `<div class="risk-baseline-compare" style="color:${color};margin-top:0.5rem;font-weight:600;padding:0.5rem;background:#1e293b;border-radius:4px;">
+      ${arrow} 基线: ${change.oldLevel} (score ${change.oldScore}) → 当前: ${change.newLevel} (score ${change.newScore})
+    </div>`;
   }
 
   // -- Export --------------------------------------------------------------

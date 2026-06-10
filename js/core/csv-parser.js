@@ -632,6 +632,58 @@ export class CSVParser {
     return s;
   }
 
+  /**
+   * Export a baseline as CSV with metadata header.
+   * @param {object} baseline — baseline object with name, createdAt, snapshot
+   * @returns {string}
+   */
+  static exportBaselineData(baseline) {
+    const meta = `# Baseline: ${baseline.name}\n` +
+      `# Created: ${new Date(baseline.createdAt).toISOString()}\n\n`;
+    return meta + CSVParser.exportData(baseline.snapshot);
+  }
+
+  /**
+   * Export a change request as CSV.
+   * @param {object} cr — change request object with title, baselineName, summary, diff
+   * @returns {string}
+   */
+  static exportChangeRequestCSV(cr) {
+    const rows = [['Section', 'Field', 'Value']];
+    const s = cr.summary;
+    rows.push(['Summary', 'Title', cr.title]);
+    rows.push(['Summary', 'Baseline', cr.baselineName]);
+    rows.push(['Summary', 'Status', cr.status]);
+    rows.push(['Summary', 'Tasks Changed', s.totalTasksChanged]);
+    rows.push(['Summary', 'Total Delay Days', s.totalDelayDays]);
+    rows.push(['Summary', 'CP Added', s.criticalPathAdded]);
+    rows.push(['Summary', 'CP Removed', s.criticalPathRemoved]);
+    rows.push(['Summary', 'Risks Upgraded', s.risksUpgraded]);
+    rows.push(['', '', '']);
+
+    for (const tc of (cr.diff.taskChanges || [])) {
+      if (tc.delayDays === 0 && !tc.isNew && !tc.isDeleted && !tc.addedToCriticalPath && !tc.removedFromCriticalPath) continue;
+      const cpStatus = tc.addedToCriticalPath ? 'added' : tc.removedFromCriticalPath ? 'removed' : 'unchanged';
+      rows.push([
+        'Task Change',
+        tc.taskName,
+        `Delay: ${tc.delayDays > 0 ? '+' : ''}${tc.delayDays}d, CP: ${cpStatus}`,
+      ]);
+    }
+
+    for (const rc of (cr.diff.riskChanges || [])) {
+      rows.push([
+        'Risk Change',
+        rc.name,
+        `${rc.oldLevel}(${rc.oldScore}) → ${rc.newLevel}(${rc.newScore}) ${rc.direction}`,
+      ]);
+    }
+
+    return rows.map(row =>
+      row.map(c => CSVParser._csvEscape(c)).join(',')
+    ).join('\n');
+  }
+
   // -----------------------------------------------------------------------
   // Sample CSV generation
   // -----------------------------------------------------------------------

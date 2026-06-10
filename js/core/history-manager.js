@@ -157,7 +157,11 @@ export class HistoryManager {
   // Auto-capture via store subscription
   // -----------------------------------------------------------------------
 
-  /** Subscribe to store mutations and auto-push after a debounce period */
+  /** Subscribe to store mutations and auto-push after a debounce period.
+   *  NOTE: 'baseline' event types are intentionally excluded from auto-capture.
+   *  Baselines are managed by BaselineManager and stored separately from the
+   *  undo/redo history. This ensures undo/redo never destroys baselines.
+   */
   _setupAutoCapture() {
     this._unsubscribe = this._store.subscribe((event) => {
       // Skip if we're currently restoring state (avoid feedback loop)

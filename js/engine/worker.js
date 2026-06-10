@@ -45,15 +45,22 @@ self.onmessage = function (e) {
       case 'parse-csv':
         result = parseCSVInWorker(payload);
         break;
+      case 'compute-change-impact':
+        result = computeChangeImpact(payload);
+        break;
+      case 'validate-all':
+        result = computeValidation(payload);
+        break;
       default:
         throw new Error('Unknown message type: ' + type);
     }
-    self.postMessage({ id: id, type: type, result: result });
+    self.postMessage({ id: id, type: type, result: result, stateVersion: payload._stateVersion || 0 });
   } catch (err) {
     self.postMessage({
       id: id,
       type: type,
       error: err.message || String(err),
+      stateVersion: payload._stateVersion || 0,
     });
   }
 };
@@ -759,4 +766,404 @@ function riskScoreToLevel(score) {
   if (score >= 12) return 'high';
   if (score >= 6) return 'medium';
   return 'low';
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  7. CHANGE IMPACT — diff between baseline and current snapshots
+// ═══════════════════════════════════════════════════════════════════════
+
+function computeChangeImpact(payload) {
+  var baselineSnapshot = payload.baselineSnapshot;
+  var currentSnapshot = payload.currentSnapshot;
+  var baselineCritIds = payload.baselineCriticalPath || [];
+  var currentCritIds = payload.currentCriticalPath || [];
+
+  reportProgress(payload._id, 'compute-change-impact', 10);
+
+  // Build task maps
+  var blTaskMap = {};
+  var i;
+  for (i = 0; i < (baselineSnapshot.tasks || []).length; i++) {
+    blTaskMap[baselineSnapshot.tasks[i].id] = baselineSnapshot.tasks[i];
+  }
+  var curTaskMap = {};
+  for (i = 0; i < (currentSnapshot.tasks || []).length; i++) {
+    curTaskMap[currentSnapshot.tasks[i].id] = currentSnapshot.tasks[i];
+  }
+
+  // Build critical path sets
+  var blCritSet = {};
+  for (i = 0; i < baselineCritIds.length; i++) blCritSet[baselineCritIds[i]] = true;
+  var curCritSet = {};
+  for (i = 0; i < currentCritIds.length; i++) curCritSet[currentCritIds[i]] = true;
+
+  reportProgress(payload._id, 'compute-change-impact', 25);
+
+  // Diff tasks
+  var taskChanges = [];
+  var curIds = Object.keys(curTaskMap);
+  for (i = 0; i < curIds.length; i++) {
+    var id = curIds[i];
+    var cur = curTaskMap[id];
+    var bl = blTaskMap[id];
+    var isNew = !bl;
+
+    var delayDays = 0;
+    if (!isNew && bl.plannedEnd && cur.plannedEnd) {
+      var blEnd = new Date(bl.plannedEnd + 'T00:00:00');
+      var curEnd = new Date(cur.plannedEnd + 'T00:00:00');
+      if (!isNaN(blEnd.getTime()) && !isNaN(curEnd.getTime())) {
+        var sign = curEnd >= blEnd ? 1 : -1;
+        var from = sign === 1 ? blEnd : curEnd;
+        var to = sign === 1 ? curEnd : blEnd;
+        var cnt = 0;
+        var d = new Date(from);
+        while (d <= to) {
+          var dow = d.getDay();
+          if (dow !== 0 && dow !== 6) cnt++;
+          d.setDate(d.getDate() + 1);
+        }
+        delayDays = sign * cnt;
+      }
+    }
+
+    var wasCritical = !!blCritSet[id];
+    var isCritical = !!curCritSet[id];
+
+    taskChanges.push({
+      taskId: id,
+      taskName: cur.name || '',
+      projectId: cur.projectId || '',
+      delayDays: delayDays,
+      baselineStart: bl ? (bl.plannedStart || '') : '',
+      baselineEnd: bl ? (bl.plannedEnd || '') : '',
+      currentStart: cur.plannedStart || '',
+      currentEnd: cur.plannedEnd || '',
+      addedToCriticalPath: !wasCritical && isCritical,
+      removedFromCriticalPath: wasCritical && !isCritical,
+      wasCritical: wasCritical,
+      isCritical: isCritical,
+      baselineStatus: bl ? (bl.status || '') : '',
+      currentStatus: cur.status || '',
+      baselineProgress: bl ? (bl.progress || 0) : 0,
+      currentProgress: cur.progress || 0,
+      baselineAssignee: bl ? (bl.assignee || '') : '',
+      currentAssignee: cur.assignee || '',
+      baselineDeps: bl ? (bl.dependencies || []).slice() : [],
+      currentDeps: (cur.dependencies || []).slice(),
+      isNew: isNew,
+      isDeleted: false,
+    });
+  }
+
+  // Deleted tasks (in baseline but not current)
+  var blIds = Object.keys(blTaskMap);
+  for (i = 0; i < blIds.length; i++) {
+    var bid = blIds[i];
+    if (!curTaskMap[bid]) {
+      var blt = blTaskMap[bid];
+      taskChanges.push({
+        taskId: bid, taskName: blt.name || '', projectId: blt.projectId || '',
+        delayDays: 0,
+        baselineStart: blt.plannedStart || '', baselineEnd: blt.plannedEnd || '',
+        currentStart: '', currentEnd: '',
+        addedToCriticalPath: false, removedFromCriticalPath: !!blCritSet[bid],
+        wasCritical: !!blCritSet[bid], isCritical: false,
+        baselineStatus: blt.status || '', currentStatus: '',
+        baselineProgress: blt.progress || 0, currentProgress: 0,
+        baselineAssignee: blt.assignee || '', currentAssignee: '',
+        baselineDeps: (blt.dependencies || []).slice(), currentDeps: [],
+        isNew: false, isDeleted: true,
+      });
+    }
+  }
+
+  reportProgress(payload._id, 'compute-change-impact', 50);
+
+  // Critical path diff
+  var cpAdded = [];
+  var cpRemoved = [];
+  for (i = 0; i < currentCritIds.length; i++) {
+    if (!blCritSet[currentCritIds[i]]) cpAdded.push(currentCritIds[i]);
+  }
+  for (i = 0; i < baselineCritIds.length; i++) {
+    if (!curCritSet[baselineCritIds[i]]) cpRemoved.push(baselineCritIds[i]);
+  }
+
+  reportProgress(payload._id, 'compute-change-impact', 65);
+
+  // Resource overload diff
+  var blResMap = {};
+  for (i = 0; i < (baselineSnapshot.resources || []).length; i++) {
+    blResMap[baselineSnapshot.resources[i].id] = baselineSnapshot.resources[i];
+  }
+  var curResMap = {};
+  for (i = 0; i < (currentSnapshot.resources || []).length; i++) {
+    curResMap[currentSnapshot.resources[i].id] = currentSnapshot.resources[i];
+  }
+
+  var resourceOverloadDiff = [];
+  var resIds = Object.keys(curResMap);
+  for (i = 0; i < resIds.length; i++) {
+    var resId = resIds[i];
+    var curRes = curResMap[resId];
+    if (!curRes.tasks || curRes.tasks.length === 0) continue;
+
+    var curOverloads = findOverloadDatesInWorker(curRes, curTaskMap);
+    var blRes = blResMap[resId];
+    var blOverloads = blRes ? findOverloadDatesInWorker(blRes, blTaskMap) : {};
+
+    var newOverloads = [];
+    var resolvedOverloads = [];
+    var date;
+    for (date in curOverloads) {
+      if (!blOverloads[date]) {
+        newOverloads.push({ date: date, totalAllocation: curOverloads[date].total, causativeTasks: [] });
+      }
+    }
+    for (date in blOverloads) {
+      if (!curOverloads[date]) {
+        resolvedOverloads.push({ date: date, totalAllocation: blOverloads[date].total });
+      }
+    }
+
+    if (newOverloads.length > 0 || resolvedOverloads.length > 0) {
+      resourceOverloadDiff.push({
+        resourceId: resId, resourceName: curRes.name || '',
+        newOverloads: newOverloads, resolvedOverloads: resolvedOverloads,
+      });
+    }
+  }
+
+  reportProgress(payload._id, 'compute-change-impact', 80);
+
+  // Risk diff
+  var blRiskMap = {};
+  for (i = 0; i < (baselineSnapshot.risks || []).length; i++) {
+    blRiskMap[baselineSnapshot.risks[i].id] = baselineSnapshot.risks[i];
+  }
+  var curRiskMap = {};
+  for (i = 0; i < (currentSnapshot.risks || []).length; i++) {
+    curRiskMap[currentSnapshot.risks[i].id] = currentSnapshot.risks[i];
+  }
+
+  var riskChanges = [];
+  var riskIds = Object.keys(curRiskMap);
+  for (i = 0; i < riskIds.length; i++) {
+    var rid = riskIds[i];
+    var curR = curRiskMap[rid];
+    var blR = blRiskMap[rid];
+    if (!blR) {
+      riskChanges.push({
+        riskId: rid, name: curR.name || '', oldLevel: '', newLevel: curR.level || 'low',
+        oldScore: 0, newScore: (curR.probability || 1) * (curR.impact || 1), direction: 'new',
+      });
+      continue;
+    }
+    var oldScore = (blR.probability || 1) * (blR.impact || 1);
+    var newScore = (curR.probability || 1) * (curR.impact || 1);
+    var direction = newScore > oldScore ? 'upgraded' : newScore < oldScore ? 'downgraded' : 'unchanged';
+    if (direction !== 'unchanged') {
+      riskChanges.push({
+        riskId: rid, name: curR.name || '',
+        oldLevel: blR.level || riskScoreToLevel(oldScore),
+        newLevel: curR.level || riskScoreToLevel(newScore),
+        oldScore: oldScore, newScore: newScore, direction: direction,
+      });
+    }
+  }
+
+  reportProgress(payload._id, 'compute-change-impact', 95);
+
+  // Build summary
+  var totalTasksChanged = 0;
+  var totalDelayDays = 0;
+  for (i = 0; i < taskChanges.length; i++) {
+    var tc = taskChanges[i];
+    if (tc.delayDays !== 0 || tc.isNew || tc.isDeleted || tc.addedToCriticalPath || tc.removedFromCriticalPath) {
+      totalTasksChanged++;
+    }
+    if (tc.delayDays > 0) totalDelayDays += tc.delayDays;
+  }
+
+  var newOvlCount = 0;
+  var resolvedOvlCount = 0;
+  for (i = 0; i < resourceOverloadDiff.length; i++) {
+    newOvlCount += resourceOverloadDiff[i].newOverloads.length;
+    resolvedOvlCount += resourceOverloadDiff[i].resolvedOverloads.length;
+  }
+
+  var risksUpgraded = 0;
+  var risksDowngraded = 0;
+  for (i = 0; i < riskChanges.length; i++) {
+    if (riskChanges[i].direction === 'upgraded') risksUpgraded++;
+    if (riskChanges[i].direction === 'downgraded') risksDowngraded++;
+  }
+
+  return {
+    taskChanges: taskChanges,
+    criticalPathDiff: { added: cpAdded, removed: cpRemoved },
+    resourceOverloadDiff: resourceOverloadDiff,
+    riskChanges: riskChanges,
+    summary: {
+      totalTasksChanged: totalTasksChanged,
+      totalDelayDays: totalDelayDays,
+      criticalPathAdded: cpAdded.length,
+      criticalPathRemoved: cpRemoved.length,
+      newOverloads: newOvlCount,
+      resolvedOverloads: resolvedOvlCount,
+      risksUpgraded: risksUpgraded,
+      risksDowngraded: risksDowngraded,
+    },
+  };
+}
+
+/** Helper: find overload dates for a resource given a task map */
+function findOverloadDatesInWorker(resource, taskMap) {
+  var overloads = {};
+  var maxCap = resource.maxCapacity || 100;
+  if (!resource.tasks) return overloads;
+
+  var dayMap = {};
+  for (var i = 0; i < resource.tasks.length; i++) {
+    var assignment = resource.tasks[i];
+    var task = taskMap[assignment.taskId];
+    if (!task || !task.plannedStart || !task.plannedEnd) continue;
+
+    var start = new Date(task.plannedStart + 'T00:00:00');
+    var end = new Date(task.plannedEnd + 'T00:00:00');
+    if (isNaN(start.getTime()) || isNaN(end.getTime())) continue;
+
+    var alloc = assignment.allocation || 0;
+    var d = new Date(start);
+    while (d <= end) {
+      var dow = d.getDay();
+      if (dow !== 0 && dow !== 6) {
+        var dateStr = toDateStr(d);
+        if (!dayMap[dateStr]) dayMap[dateStr] = { total: 0, tasks: [] };
+        dayMap[dateStr].total += alloc;
+        dayMap[dateStr].tasks.push(assignment.taskId);
+      }
+      d.setDate(d.getDate() + 1);
+    }
+  }
+
+  for (var dt in dayMap) {
+    if (dayMap[dt].total > maxCap) {
+      overloads[dt] = dayMap[dt];
+    }
+  }
+
+  return overloads;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  8. VALIDATION — circular deps, dangling refs, duplicate allocations
+// ═══════════════════════════════════════════════════════════════════════
+
+function computeValidation(payload) {
+  var tasks = payload.tasks || [];
+  var resources = payload.resources || [];
+  var issues = [];
+
+  reportProgress(payload._id, 'validate-all', 10);
+
+  // Build task lookup
+  var taskMap = {};
+  for (var i = 0; i < tasks.length; i++) {
+    taskMap[tasks[i].id] = tasks[i];
+  }
+
+  // 1. Circular dependency detection (tri-colour DFS)
+  var adj = {};
+  for (i = 0; i < tasks.length; i++) {
+    var waitsFor = [];
+    var deps = tasks[i].dependencies || [];
+    for (var j = 0; j < deps.length; j++) {
+      if (taskMap[deps[j]]) waitsFor.push(deps[j]);
+    }
+    var cpDeps = tasks[i].crossProjectDeps || [];
+    for (j = 0; j < cpDeps.length; j++) {
+      if (taskMap[cpDeps[j].taskId]) waitsFor.push(cpDeps[j].taskId);
+    }
+    adj[tasks[i].id] = waitsFor;
+  }
+
+  var color = {};
+  for (i = 0; i < tasks.length; i++) color[tasks[i].id] = 0;
+  var cycles = [];
+
+  function dfsCycle(nodeId, path) {
+    color[nodeId] = 1;
+    path.push(nodeId);
+    var neighbors = adj[nodeId] || [];
+    for (var k = 0; k < neighbors.length; k++) {
+      var next = neighbors[k];
+      if (color[next] === 1) {
+        var idx = path.indexOf(next);
+        cycles.push(path.slice(idx));
+      } else if (color[next] === 0) {
+        dfsCycle(next, path);
+      }
+    }
+    path.pop();
+    color[nodeId] = 2;
+  }
+
+  for (i = 0; i < tasks.length; i++) {
+    if (color[tasks[i].id] === 0) dfsCycle(tasks[i].id, []);
+  }
+
+  for (i = 0; i < cycles.length; i++) {
+    issues.push({
+      severity: 'error',
+      type: 'circular-dep',
+      message: 'Circular dependency involving ' + cycles[i].length + ' tasks',
+      affectedIds: cycles[i],
+    });
+  }
+
+  reportProgress(payload._id, 'validate-all', 50);
+
+  // 2. Dangling cross-project refs
+  for (i = 0; i < tasks.length; i++) {
+    var cpdList = tasks[i].crossProjectDeps || [];
+    for (j = 0; j < cpdList.length; j++) {
+      if (!taskMap[cpdList[j].taskId]) {
+        issues.push({
+          severity: 'warning',
+          type: 'dangling-cross-ref',
+          message: 'Task "' + (tasks[i].name || tasks[i].id) + '" references non-existent task "' + cpdList[j].taskId + '"',
+          affectedIds: [tasks[i].id],
+        });
+      }
+    }
+  }
+
+  reportProgress(payload._id, 'validate-all', 75);
+
+  // 3. Duplicate resource allocations
+  for (i = 0; i < resources.length; i++) {
+    var res = resources[i];
+    if (!res.tasks) continue;
+    var seen = {};
+    for (j = 0; j < res.tasks.length; j++) {
+      var tid = res.tasks[j].taskId;
+      seen[tid] = (seen[tid] || 0) + 1;
+    }
+    for (var tId in seen) {
+      if (seen[tId] > 1) {
+        issues.push({
+          severity: 'warning',
+          type: 'duplicate-allocation',
+          message: 'Resource "' + (res.name || res.id) + '" assigned to task "' + tId + '" ' + seen[tId] + ' times',
+          affectedIds: [res.id, tId],
+        });
+      }
+    }
+  }
+
+  reportProgress(payload._id, 'validate-all', 100);
+
+  return issues;
 }

@@ -2462,3 +2462,318 @@ input, select, textarea {
 #view-container > * {
   animation: fadeIn 200ms ease;
 }
+
+/* ── Baseline View ───────────────────────────────────────────── */
+
+.baseline-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg-base, #0f172a);
+}
+
+.baseline-toolbar {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid var(--border-color, #334155);
+  align-items: center;
+}
+
+.baseline-active-label {
+  color: var(--text-muted, #94a3b8);
+  font-size: 0.85rem;
+  margin-left: 0.5rem;
+}
+
+.baseline-body {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+.baseline-sidebar {
+  width: 260px;
+  border-right: 1px solid var(--border-color, #334155);
+  overflow-y: auto;
+  padding: 0.5rem;
+}
+
+.baseline-main {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1rem;
+}
+
+.baseline-item {
+  padding: 0.5rem;
+  border-radius: 6px;
+  cursor: pointer;
+  margin-bottom: 0.25rem;
+}
+
+.baseline-item:hover {
+  background: var(--hover-bg, rgba(255,255,255,0.05));
+}
+
+.baseline-item--active {
+  background: var(--active-bg, rgba(59,130,246,0.15));
+  border-left: 3px solid var(--accent-color, #3b82f6);
+}
+
+.baseline-item-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.baseline-active-dot {
+  color: #22c55e;
+  font-size: 0.8rem;
+}
+
+.baseline-item-meta {
+  color: var(--text-muted, #94a3b8);
+  font-size: 0.75rem;
+  margin-top: 0.2rem;
+}
+
+.baseline-item-actions {
+  display: flex;
+  gap: 0.25rem;
+  margin-top: 0.25rem;
+}
+
+.btn-xs {
+  font-size: 0.7rem;
+  padding: 0.15rem 0.4rem;
+  border-radius: 3px;
+  border: 1px solid var(--border-color, #334155);
+  background: transparent;
+  color: var(--text-primary, #e2e8f0);
+  cursor: pointer;
+}
+
+.btn-xs:hover {
+  background: var(--hover-bg, rgba(255,255,255,0.05));
+}
+
+.btn-xs-danger {
+  border-color: #ef4444;
+  color: #ef4444;
+}
+
+.impact-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.impact-card {
+  padding: 0.75rem;
+  border-radius: 8px;
+  background: var(--card-bg, #1e293b);
+  text-align: center;
+}
+
+.impact-card-value {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--text-primary, #f8fafc);
+}
+
+.impact-card-label {
+  font-size: 0.75rem;
+  color: var(--text-muted, #94a3b8);
+  margin-top: 0.2rem;
+}
+
+.baseline-section-title {
+  font-size: 0.9rem;
+  color: var(--text-muted, #94a3b8);
+  margin: 1.5rem 0 0.5rem;
+  padding-bottom: 0.25rem;
+  border-bottom: 1px solid var(--border-color, #334155);
+}
+
+.baseline-section-empty {
+  color: var(--text-muted, #64748b);
+  font-size: 0.85rem;
+  font-style: italic;
+}
+
+.baseline-empty-state {
+  text-align: center;
+  padding: 3rem 1rem;
+  color: var(--text-muted, #94a3b8);
+}
+
+.baseline-empty {
+  color: var(--text-muted, #64748b);
+  font-size: 0.85rem;
+  text-align: center;
+  padding: 1rem;
+}
+
+.change-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.change-table th,
+.change-table td {
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--border-color, #334155);
+  text-align: left;
+}
+
+.change-table th {
+  background: var(--header-bg, #0f172a);
+  position: sticky;
+  top: 0;
+  color: var(--text-muted, #94a3b8);
+  font-weight: 600;
+}
+
+.delay-positive { color: #ef4444; font-weight: 600; }
+.delay-negative { color: #22c55e; font-weight: 600; }
+.delay-zero { color: var(--text-muted, #94a3b8); }
+.cp-added { color: #ef4444; font-weight: 600; }
+.cp-removed { color: #22c55e; font-weight: 600; }
+.risk-upgraded { color: #ef4444; font-weight: 600; }
+.risk-downgraded { color: #22c55e; font-weight: 600; }
+
+/* Critical path diff list */
+.cp-diff-list { margin: 0.5rem 0; }
+.cp-diff-item {
+  padding: 0.3rem 0.5rem;
+  margin: 0.15rem 0;
+  border-radius: 4px;
+  font-size: 0.85rem;
+}
+.cp-diff-item.cp-added {
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.1);
+}
+.cp-diff-item.cp-removed {
+  color: #22c55e;
+  background: rgba(34, 197, 94, 0.1);
+}
+
+/* Resource overload diff */
+.resource-diff-list { margin: 0.5rem 0; }
+.resource-diff-item {
+  padding: 0.5rem;
+  margin: 0.25rem 0;
+  background: var(--card-bg, #1e293b);
+  border-radius: 6px;
+}
+.new-overloads { margin-top: 0.25rem; }
+.overload-new {
+  font-size: 0.8rem;
+  padding: 0.2rem 0;
+}
+.overload-causes {
+  margin-left: 1rem;
+  margin-top: 0.15rem;
+}
+.resolved-overloads {
+  color: #22c55e;
+  font-size: 0.8rem;
+  margin-top: 0.2rem;
+}
+
+/* Resource change markers */
+.resource-conflict-item--new {
+  border-left: 3px solid #ef4444;
+}
+
+.resource-change-tag {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  margin-left: 0.5rem;
+}
+
+.resource-cause-tag {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--text-muted, #94a3b8);
+  margin-top: 0.2rem;
+}
+
+/* Change Request panel */
+.cr-panel {
+  border-top: 1px solid var(--border-color, #334155);
+  padding: 0.75rem;
+}
+
+.cr-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.cr-draft-list {
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.cr-draft-item {
+  padding: 0.5rem;
+  margin: 0.25rem 0;
+  background: var(--card-bg, #1e293b);
+  border-radius: 6px;
+}
+
+.cr-draft-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.cr-draft-status {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+}
+
+.cr-status-draft { background: #fef9c3; color: #92400e; }
+.cr-status-submitted { background: #dbeafe; color: #1e40af; }
+.cr-status-approved { background: #dcfce7; color: #166534; }
+.cr-status-rejected { background: #fecaca; color: #991b1b; }
+
+.cr-draft-meta {
+  font-size: 0.75rem;
+  color: var(--text-muted, #94a3b8);
+  margin-top: 0.15rem;
+}
+
+.cr-draft-actions {
+  display: flex;
+  gap: 0.25rem;
+  margin-top: 0.25rem;
+}
+
+.cr-empty {
+  color: var(--text-muted, #64748b);
+  font-size: 0.85rem;
+  font-style: italic;
+}
+
+/* Baseline indicator in toolbar */
+.toolbar-baseline-indicator {
+  margin-left: 0.5rem;
+  font-size: 0.8rem;
+}
+
+/* Gantt baseline ghost bar */
+.gantt-baseline-bar {
+  pointer-events: none;
+}

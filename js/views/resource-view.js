@@ -15,6 +15,7 @@ export class ResourceView {
     this.container = container;
     this.store = store;
     this.resEngine = optionsOrEngine?.resourceEngine || optionsOrEngine;
+    this._changeImpactEngine = optionsOrEngine?.changeImpactEngine || null;
 
     this._listeners = [];
     this._unsubscribe = null;
@@ -111,17 +112,33 @@ export class ResourceView {
 
   _renderConflictAlerts() {
     const conflicts = this.resEngine.detectConflicts();
+    const overloadChanges = this._changeImpactEngine ? this._changeImpactEngine.getResourceOverloadChanges() : [];
+    const changeMap = new Map(overloadChanges.map(oc => [oc.resourceId, oc]));
+
     if (!conflicts.length) {
       this._els.conflictList.innerHTML = '<p class="resource-empty">No conflicts detected.</p>';
       return;
     }
-    this._els.conflictList.innerHTML = conflicts.map((c) => `
-      <div class="resource-conflict-item">
+    this._els.conflictList.innerHTML = conflicts.map((c) => {
+      const change = changeMap.get(c.resourceId);
+      const isNewOverload = change && change.newOverloads.some(no => no.date === c.date);
+      const newTag = isNewOverload
+        ? '<span class="resource-change-tag">NEW</span>' : '';
+      const causeInfo = isNewOverload
+        ? change.newOverloads.find(no => no.date === c.date) : null;
+      const causeTag = causeInfo && causeInfo.causativeTasks && causeInfo.causativeTasks.length
+        ? '<span class="resource-cause-tag">Caused by: ' +
+          causeInfo.causativeTasks.map(t => t.taskName).join(', ') + '</span>'
+        : '';
+
+      return `<div class="resource-conflict-item${isNewOverload ? ' resource-conflict-item--new' : ''}">
         <span class="resource-conflict-badge">${c.totalAllocation}%</span>
         <strong>${c.resourceName}</strong> on ${new Date(c.date).toLocaleDateString()}
+        ${newTag}
         <span class="resource-conflict-detail">${c.tasks.length} tasks, capacity ${c.maxCapacity}%</span>
-      </div>
-    `).join('');
+        ${causeTag}
+      </div>`;
+    }).join('');
   }
 
   // -- Resource list -------------------------------------------------------

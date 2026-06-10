@@ -11,14 +11,19 @@
 import { Store }            from './core/store.js';
 import { CSVParser }        from './core/csv-parser.js';
 import { DependencyEngine } from './core/dependency-engine.js';
+import { BaselineManager }  from './core/baseline-manager.js';
 import { ResourceEngine }   from './engine/resource-engine.js';
 import { RiskEngine }       from './engine/risk-engine.js';
+import { ChangeImpactEngine }   from './engine/change-impact-engine.js';
+import { ChangeRequestBuilder } from './engine/change-request-builder.js';
+import { ValidationEngine }     from './engine/validation-engine.js';
 import { HistoryManager }   from './core/history-manager.js';
 import { GanttChart }       from './views/gantt-chart.js';
 import { MilestoneView }    from './views/milestone-view.js';
 import { ResourceView }     from './views/resource-view.js';
 import { DelayHeatmap }     from './views/delay-heatmap.js';
 import { RiskMatrix }       from './views/risk-matrix.js';
+import { BaselineView }     from './views/baseline-view.js';
 import { FilterBar }        from './views/filter-bar.js';
 import { Toolbar }          from './views/toolbar.js';
 
@@ -53,6 +58,7 @@ const VIEW_LABELS = {
   resource:   '资源',
   heatmap:    '延迟热力图',
   risk:       '风险矩阵',
+  baseline:   '基线对比',
 };
 
 /* ========================================================================== */
@@ -76,6 +82,28 @@ class App {
     this.worker      = null;   // Web Worker handle
     this.workerReqId = 0;      // monotonic id for worker promise map
     this.workerPending = new Map(); // id → { resolve, reject }
+    this.stateVersion = 0;     // monotonic version for stale result filtering
+
+    // Baseline & change impact
+    this.baselineManager = new BaselineManager(this.store, {
+      dependencyEngine: this.dependencyEngine,
+      resourceEngine:   this.resourceEngine,
+      riskEngine:       this.riskEngine,
+    });
+    this.changeImpactEngine = new ChangeImpactEngine(this.store, this.baselineManager, {
+      dependencyEngine: this.dependencyEngine,
+      resourceEngine:   this.resourceEngine,
+      riskEngine:       this.riskEngine,
+      workerRequest:    (t, p) => this.workerRequest(t, p),
+    });
+    this.changeRequestBuilder = new ChangeRequestBuilder(
+      this.store, this.baselineManager, this.changeImpactEngine
+    );
+    this.validationEngine = new ValidationEngine(this.store, {
+      dependencyEngine: this.dependencyEngine,
+      resourceEngine:   this.resourceEngine,
+      baselineManager:  this.baselineManager,
+    });
 
     this.toolbar   = null;
     this.filterBar = null;
@@ -116,6 +144,10 @@ class App {
     // Restore persisted state (if any)
     this.loadState();
 
+    // Load baselines and change requests from localStorage
+    this.baselineManager.loadFromStorage();
+    this.changeRequestBuilder.loadFromStorage();
+
     // Auto-save pipeline
     this.setupAutoSave();
 
@@ -142,7 +174,7 @@ class App {
     try {
       this.worker = new Worker('js/engine/worker.js', { type: 'module' });
       this.worker.onmessage = (e) => {
-        const { id, result, error, progress } = e.data;
+        const { id, result, error, progress, stateVersion } = e.data;
         const pending = this.workerPending.get(id);
         if (!pending) return;
 
@@ -151,6 +183,13 @@ class App {
         if (progress !== undefined) return;
 
         this.workerPending.delete(id);
+
+        // Discard stale results — older version means state has moved on
+        if (stateVersion !== undefined && pending.version !== undefined && stateVersion < pending.version) {
+          pending.resolve(null);
+          return;
+        }
+
         if (error) {
           pending.reject(new Error(error));
         } else {
@@ -173,9 +212,10 @@ class App {
   workerRequest(type, payload) {
     if (!this.worker) return Promise.resolve(null);
     const id = ++this.workerReqId;
+    const version = this.stateVersion;
     return new Promise((resolve, reject) => {
-      this.workerPending.set(id, { resolve, reject });
-      this.worker.postMessage({ id, type, payload });
+      this.workerPending.set(id, { resolve, reject, version });
+      this.worker.postMessage({ id, type, payload: { ...payload, _stateVersion: version } });
     });
   }
 
@@ -231,6 +271,24 @@ class App {
    * an undo snapshot.
    */
   async handleCSVImport(files) {
+    // Pre-import validation (multi-file)
+    if (this.validationEngine && files.length > 0) {
+      try {
+        const issues = await this.validationEngine.validateMultiFileImport(files);
+        const errors = issues.filter(i => i.severity === 'error');
+        if (errors.length > 0) {
+          for (const err of errors) {
+            this.showToast(err.message, 'error', 6000);
+          }
+          return;
+        }
+        const warnings = issues.filter(i => i.severity === 'warning');
+        for (const warn of warnings) {
+          this.showToast(warn.message, 'warning', 4000);
+        }
+      } catch (_) { /* validation is best-effort */ }
+    }
+
     // Suppress history auto-capture during import so we get exactly one snapshot
     this.historyManager._restoring = true;
     const results = [];
@@ -308,12 +366,17 @@ class App {
         resource:  ResourceView,
         heatmap:   DelayHeatmap,
         risk:      RiskMatrix,
+        baseline:  BaselineView,
       }[viewName];
 
       this.views[viewName] = new ViewClass(container, this.store, {
         dependencyEngine: this.dependencyEngine,
         resourceEngine:   this.resourceEngine,
         riskEngine:       this.riskEngine,
+        baselineManager:  this.baselineManager,
+        changeImpactEngine: this.changeImpactEngine,
+        changeRequestBuilder: this.changeRequestBuilder,
+        validationEngine: this.validationEngine,
         workerRequest:    (t, p) => this.workerRequest(t, p),
         showToast:        (m, t) => this.showToast(m, t),
         showModal:        (c)    => this.showModal(c),
@@ -341,6 +404,11 @@ class App {
   /* ---------------------------------------------------------------------- */
 
   onStoreChange(event) {
+    // Increment state version for worker stale-result filtering
+    if (['task', 'project', 'risk', 'resource', 'batch', 'restore'].includes(event?.type)) {
+      this.stateVersion++;
+    }
+
     this.updateStatusBar();
     this._debouncedRender();
 
@@ -406,6 +474,10 @@ class App {
       };
       localStorage.setItem('pmo-dashboard-state', JSON.stringify(payload));
       this._lastSaveTime = new Date();
+
+      // Also persist baselines and change requests
+      this.baselineManager.saveToStorage();
+      this.changeRequestBuilder.saveToStorage();
     } catch (err) {
       console.warn('[App] Failed to save state:', err);
     }
@@ -517,6 +589,30 @@ class App {
       tasks: snapshot.tasks,
       projects: snapshot.projects,
     });
+
+    // Compute change impact if baseline is active
+    const activeBaseline = this.baselineManager.getActiveBaseline();
+    if (activeBaseline) {
+      const currentSnapshot = this.store.exportData();
+      let currentCritIds = [];
+      try {
+        const cp = this.dependencyEngine.calculateCriticalPath(null);
+        currentCritIds = cp.taskIds || [];
+      } catch (_) { /* */ }
+
+      this.workerRequest('compute-change-impact', {
+        baselineSnapshot: activeBaseline.snapshot,
+        currentSnapshot,
+        baselineCriticalPath: activeBaseline.metrics.criticalPathTaskIds || [],
+        currentCriticalPath: currentCritIds,
+      }).then(result => {
+        if (result) {
+          result.baselineId = activeBaseline.id;
+          result.computedAt = Date.now();
+          this.store.state.changeDiff = result;
+        }
+      });
+    }
   }
 
   /* ---------------------------------------------------------------------- */

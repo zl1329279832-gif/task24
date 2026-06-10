@@ -28,6 +28,9 @@ export class GanttChart {
     this.container = container;
     this.store = store;
     this.deps = optionsOrDeps?.dependencyEngine || optionsOrDeps;
+    this._baselineManager = optionsOrDeps?.baselineManager || null;
+    this._changeImpactEngine = optionsOrDeps?.changeImpactEngine || null;
+    this._showBaseline = false;
 
     // Interaction state
     this._drag = null;
@@ -74,6 +77,7 @@ export class GanttChart {
         <button class="gantt-btn" data-action="zoom-in" title="Zoom In">+</button>
         <button class="gantt-btn" data-action="zoom-out" title="Zoom Out">&minus;</button>
         <button class="gantt-btn" data-action="fit" title="Fit All">Fit</button>
+        <button class="gantt-btn" data-action="toggle-baseline" title="显示基线">BL</button>
       </div>
       <div class="gantt-body">
         <div class="gantt-left">
@@ -109,6 +113,7 @@ export class GanttChart {
       if (action === 'zoom-in') { this._zoomLevel = Math.min(this._zoomLevel + 0.5, 3); this.render(); }
       if (action === 'zoom-out') { this._zoomLevel = Math.max(this._zoomLevel - 0.5, 0.25); this.render(); }
       if (action === 'fit') { this._zoomLevel = 1; this.render(); }
+      if (action === 'toggle-baseline') { this._showBaseline = !this._showBaseline; this.render(); }
     });
 
     // Sync scroll between left and right panels
@@ -334,6 +339,30 @@ export class GanttChart {
 
   _renderTaskBar(svg, task, project, y) {
     const ns = 'http://www.w3.org/2000/svg';
+
+    // --- Baseline ghost bar (drawn FIRST, behind current bar) ---
+    if (this._showBaseline && this._baselineManager) {
+      const activeBL = this._baselineManager.getActiveBaseline();
+      if (activeBL) {
+        const blTask = activeBL.snapshot.tasks.find(t => t.id === task.id);
+        if (blTask && blTask.plannedStart && blTask.plannedEnd) {
+          const blX = this._dateToX(blTask.plannedStart);
+          const blW = Math.max(this._dateToX(blTask.plannedEnd) - blX, this._dayWidth);
+          const blY = y + (ROW_HEIGHT - BAR_HEIGHT) / 2;
+
+          const ghost = document.createElementNS(ns, 'rect');
+          Object.entries({
+            x: blX, y: blY, width: blW, height: BAR_HEIGHT, rx: 4, ry: 4,
+            fill: '#94a3b8', opacity: 0.25,
+            stroke: '#64748b', 'stroke-width': 1, 'stroke-dasharray': '4 2',
+          }).forEach(([k, v]) => ghost.setAttribute(k, v));
+          ghost.style.pointerEvents = 'none';
+          ghost.classList.add('gantt-baseline-bar');
+          svg.appendChild(ghost);
+        }
+      }
+    }
+
     const x = this._dateToX(task.plannedStart);
     const w = Math.max(this._dateToX(task.plannedEnd) - x, this._dayWidth);
     const barY = y + (ROW_HEIGHT - BAR_HEIGHT) / 2;
@@ -608,6 +637,25 @@ export class GanttChart {
       Assignee: ${task.assignee || 'Unassigned'}<br/>
       Priority: ${task.priority || 'N/A'}
     `;
+
+    // Add baseline comparison
+    if (this._showBaseline && this._changeImpactEngine) {
+      const change = this._changeImpactEngine.getTaskChange(task.id);
+      if (change && !change.isNew && !change.isDeleted) {
+        if (change.delayDays !== 0) {
+          const color = change.delayDays > 0 ? '#ef4444' : '#22c55e';
+          const sign = change.delayDays > 0 ? '+' : '';
+          tip.innerHTML += `<br/><span style="color:${color}">vs 基线: ${sign}${change.delayDays} 天</span>`;
+        }
+        if (change.addedToCriticalPath) {
+          tip.innerHTML += '<br/><span style="color:#ef4444">+ 新增到关键路径</span>';
+        }
+        if (change.removedFromCriticalPath) {
+          tip.innerHTML += '<br/><span style="color:#22c55e">- 移出关键路径</span>';
+        }
+      }
+    }
+
     tip.style.display = 'block';
     tip.style.left = e.clientX + 12 + 'px';
     tip.style.top = e.clientY + 12 + 'px';

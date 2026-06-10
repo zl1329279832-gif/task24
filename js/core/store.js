@@ -85,6 +85,12 @@ export class Store {
     /** Saved scenarios */
     this._scenarios = [];
 
+    /** Active baseline ID (null = no baseline selected) */
+    this._activeBaselineId = null;
+
+    /** Current change diff relative to active baseline */
+    this._changeDiff = null;
+
     /** Subscriber registry: each entry is { listener, typeFilter } */
     this._subscribers = [];
 
@@ -112,6 +118,8 @@ export class Store {
           case 'selectedProjectId': return self._selectedProjectId;
           case 'view':      return self._view;
           case 'scenarios': return [...self._scenarios];
+          case 'activeBaselineId': return self._activeBaselineId;
+          case 'changeDiff':       return self._changeDiff;
           default:          return undefined;
         }
       },
@@ -124,6 +132,14 @@ export class Store {
           case 'view':
             self._view = value;
             self._emit({ type: 'view', path: 'view', value });
+            return true;
+          case 'activeBaselineId':
+            self._activeBaselineId = value;
+            self._emit({ type: 'baseline', path: 'activate', value });
+            return true;
+          case 'changeDiff':
+            self._changeDiff = value;
+            self._emit({ type: 'baseline', path: 'diff-updated', value });
             return true;
           default:
             return false;
@@ -162,6 +178,11 @@ export class Store {
         try { listener(event); } catch (e) { console.error('Store subscriber error:', e); }
       }
     }
+  }
+
+  /** Emit a baseline-related event (used by BaselineManager / ChangeImpactEngine) */
+  emitBaselineEvent(path, value) {
+    this._emit({ type: 'baseline', path, value });
   }
 
   /**
