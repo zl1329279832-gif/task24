@@ -246,7 +246,8 @@ export class Toolbar {
 
   _exportHTML() {
     try {
-      const html = this.riskEngine.exportReportHTML();
+      const snapshot = this.store.getSnapshot();
+      const html = this.riskEngine.exportReportHTML(null, snapshot);
       this._downloadBlob(html, 'risk-report.html', 'text/html');
     } catch (err) {
       console.error('Export HTML failed:', err);
@@ -255,7 +256,8 @@ export class Toolbar {
 
   _exportCSV() {
     try {
-      const report = this.riskEngine.generateReport();
+      const snapshot = this.store.getSnapshot();
+      const report = this.riskEngine.generateReport(null, snapshot);
       const rows = [['Name', 'Probability', 'Impact', 'Level', 'Status', 'Owner']];
       for (const r of (report.topRisks || [])) {
         rows.push([r.name, r.probability, r.impact, r.level, r.status || '', r.owner || '']);

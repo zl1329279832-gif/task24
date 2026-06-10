@@ -48,49 +48,28 @@ function snapshotState(store) {
 
 /**
  * Restore a Store's data from a snapshot.
- * Clears existing data first, then re-inserts.
+ * Uses the store's replaceAll() method for atomic swap, which emits
+ * both a 'batch' event and a 'restore' event.  Filter/view state is
+ * restored separately since replaceAll only touches data Maps.
  */
 function restoreState(store, snapshot) {
-  store.batch(() => {
-    // Clear current data
-    for (const id of [...store.state.projects.keys()]) {
-      store._projects.delete(id);
-    }
-    for (const id of [...store.state.tasks.keys()]) {
-      store._tasks.delete(id);
-    }
-    for (const id of [...store.state.risks.keys()]) {
-      store._risks.delete(id);
-    }
-    for (const id of [...store.state.resources.keys()]) {
-      store._resources.delete(id);
-    }
-
-    // Restore from snapshot
-    for (const p of (snapshot.projects || [])) {
-      store._projects.set(p.id, deepClone(p));
-    }
-    for (const t of (snapshot.tasks || [])) {
-      store._tasks.set(t.id, deepClone(t));
-    }
-    for (const r of (snapshot.risks || [])) {
-      store._risks.set(r.id, deepClone(r));
-    }
-    for (const res of (snapshot.resources || [])) {
-      store._resources.set(res.id, deepClone(res));
-    }
-
-    // Restore filter/view state
-    if (snapshot.filters) {
-      store._filters = deepClone(snapshot.filters);
-    }
-    if (snapshot.selectedProjectId !== undefined) {
-      store._selectedProjectId = snapshot.selectedProjectId;
-    }
-    if (snapshot.view) {
-      store._view = snapshot.view;
-    }
+  store.replaceAll({
+    projects: snapshot.projects || [],
+    tasks: snapshot.tasks || [],
+    risks: snapshot.risks || [],
+    resources: snapshot.resources || [],
   });
+
+  // Restore filter/view state (these are not part of replaceAll)
+  if (snapshot.filters) {
+    store._filters = deepClone(snapshot.filters);
+  }
+  if (snapshot.selectedProjectId !== undefined) {
+    store._selectedProjectId = snapshot.selectedProjectId;
+  }
+  if (snapshot.view) {
+    store._view = snapshot.view;
+  }
 }
 
 /**
@@ -184,7 +163,7 @@ export class HistoryManager {
       // Skip if we're currently restoring state (avoid feedback loop)
       if (this._restoring) return;
 
-      // Only capture on data-mutating events, not on filter/view changes
+      // Only capture on data-mutating events, not on filter/view/restore changes
       const mutatingTypes = new Set(['project', 'task', 'risk', 'resource', 'batch']);
       if (!mutatingTypes.has(event.type)) return;
 

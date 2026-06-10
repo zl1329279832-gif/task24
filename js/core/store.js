@@ -460,6 +460,42 @@ export class Store {
     };
   }
 
+  /**
+   * Atomically replace ALL data in every Map with the supplied arrays.
+   * Emits a single 'batch' event (via batch()) followed by a dedicated
+   * 'restore' event so engines and views can distinguish a full state
+   * swap from incremental mutations.
+   */
+  replaceAll(data) {
+    this.batch(() => {
+      this._projects.clear();
+      this._tasks.clear();
+      this._risks.clear();
+      this._resources.clear();
+      for (const p of (data.projects || [])) this._projects.set(p.id, deepClone(p));
+      for (const t of (data.tasks || [])) this._tasks.set(t.id, deepClone(t));
+      for (const r of (data.risks || [])) this._risks.set(r.id, deepClone(r));
+      for (const res of (data.resources || [])) this._resources.set(res.id, deepClone(res));
+    });
+    // Emit restore AFTER the batch so subscribers know this is a full swap
+    this._emit({ type: 'restore', path: null, value: null });
+  }
+
+  /**
+   * Return a deep-cloned, frozen snapshot of the current store state.
+   * Safe to pass to engines, workers, and export functions without risk
+   * of concurrent mutation.
+   */
+  getSnapshot() {
+    return Object.freeze({
+      projects: Array.from(this._projects.values()).map(deepClone),
+      tasks: Array.from(this._tasks.values()).map(deepClone),
+      risks: Array.from(this._risks.values()).map(deepClone),
+      resources: Array.from(this._resources.values()).map(deepClone),
+      timestamp: Date.now(),
+    });
+  }
+
   // -----------------------------------------------------------------------
   // Filtered getters
   // -----------------------------------------------------------------------

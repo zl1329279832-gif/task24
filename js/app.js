@@ -231,19 +231,25 @@ class App {
    * an undo snapshot.
    */
   async handleCSVImport(files) {
+    // Suppress history auto-capture during import so we get exactly one snapshot
+    this.historyManager._restoring = true;
     const results = [];
-    for (const file of files) {
-      try {
-        const text = await this._readFile(file);
-        const data = this.csvParser.parse(text);
-        this.store.importData(data);
-        results.push({ name: file.name, rows: data.tasks?.length ?? 0, ok: true });
-      } catch (err) {
-        results.push({ name: file.name, error: err.message, ok: false });
+    try {
+      for (const file of files) {
+        try {
+          const text = await this._readFile(file);
+          const data = this.csvParser.parse(text);
+          this.store.importData(data);
+          results.push({ name: file.name, rows: data.tasks?.length ?? 0, ok: true });
+        } catch (err) {
+          results.push({ name: file.name, error: err.message, ok: false });
+        }
       }
+    } finally {
+      this.historyManager._restoring = false;
     }
 
-    // Push an undo checkpoint
+    // Push a single undo checkpoint after all imports
     this.historyManager.push('CSV 导入');
 
     // Summarise
@@ -256,6 +262,9 @@ class App {
     fail.forEach((r) => {
       this.showToast(`${r.name} 导入失败: ${r.error}`, 'error', 6000);
     });
+
+    // Sync worker with fresh state
+    this._syncWorker();
   }
 
   /** Promise wrapper around FileReader. */
@@ -335,12 +344,14 @@ class App {
     this.updateStatusBar();
     this._debouncedRender();
 
-    // Check for circular dependencies whenever task deps change
-    if (event?.type === 'task' || event?.type === 'batch') {
+    // Check for circular dependencies whenever task deps change or state is restored
+    if (event?.type === 'task' || event?.type === 'batch' || event?.type === 'restore') {
       const cycles = this.dependencyEngine.detectCircularDependencies?.();
       if (cycles?.length) {
-        this.showToast(`检测到 ${cycles.length} 个循环依赖`, 'warning', 5000);
+        this._showCycleWarning(cycles);
       }
+      // Sync worker with updated state
+      this._syncWorker();
     }
   }
 
@@ -482,6 +493,63 @@ class App {
   }
 
   /* ---------------------------------------------------------------------- */
+  /*  8b. Worker synchronization                                            */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * Send the current store snapshot to the Web Worker so that any
+   * background computations (critical path, conflict detection) use
+   * the same data the main-thread engines see.
+   */
+  _syncWorker() {
+    if (!this.worker) return;
+    const snapshot = this.store.getSnapshot();
+    const tasks = snapshot.tasks.map(t => ({
+      ...t,
+      dependencies: t.dependencies || [],
+      crossProjectDeps: t.crossProjectDeps || [],
+    }));
+    // Pre-calculate critical path via worker for all tasks
+    this.workerRequest('calculate-critical-path', { tasks });
+    // Pre-calculate resource conflicts
+    this.workerRequest('detect-conflicts', {
+      resources: snapshot.resources,
+      tasks: snapshot.tasks,
+      projects: snapshot.projects,
+    });
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /*  8c. Circular dependency warning                                       */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * Show a modal with details about detected circular dependencies.
+   * @param {Array<{cycle: string[], description: string}>} cycles
+   */
+  _showCycleWarning(cycles) {
+    const cycleHTML = cycles.map(c =>
+      `<div class="cycle-item" style="margin:0.5rem 0;padding:0.5rem;background:#fff3cd;border-radius:4px;">
+        ${this._escHTML(c.description)}
+      </div>`
+    ).join('');
+    this.showModal(`
+      <h3>⚠ 循环依赖警告 (${cycles.length})</h3>
+      <div class="cycle-list">${cycleHTML}</div>
+      <p>循环依赖中的任务将不参与关键路径计算，请修正依赖关系。</p>
+    `);
+  }
+
+  /** Minimal HTML escaping for safe injection. */
+  _escHTML(str) {
+    return String(str ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  /* ---------------------------------------------------------------------- */
   /*  9. Export risk report                                                 */
   /* ---------------------------------------------------------------------- */
 
@@ -491,7 +559,8 @@ class App {
    */
   async exportRiskReport() {
     try {
-      const html = this.riskEngine.exportReportHTML?.();
+      const snapshot = this.store.getSnapshot();
+      const html = this.riskEngine.exportReportHTML?.(null, snapshot);
       if (html) {
         const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
         const url  = URL.createObjectURL(blob);
@@ -628,8 +697,8 @@ class App {
   /** Export current store data as a CSV download. */
   _exportCSV() {
     try {
-      const data = this.store.exportData();
-      const csv = CSVParser.exportData(data);
+      const snapshot = this.store.getSnapshot();
+      const csv = CSVParser.exportData(snapshot);
       if (!csv) { this.showToast('CSV 导出不可用', 'warning'); return; }
       const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
       const url  = URL.createObjectURL(blob);

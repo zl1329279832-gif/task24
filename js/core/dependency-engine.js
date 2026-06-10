@@ -68,9 +68,9 @@ export class DependencyEngine {
 
     this._cacheValid = false;
 
-    // Invalidate cache on any task mutation
+    // Invalidate cache on any task mutation or full state restore
     this._store.subscribe((event) => {
-      if (event.type === 'task' || event.type === 'batch') {
+      if (['task', 'batch', 'restore'].includes(event.type)) {
         this._invalidateCache();
       }
     });

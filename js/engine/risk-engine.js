@@ -22,12 +22,12 @@ const LEVEL_COLORS = { low: '#4caf50', medium: '#ff9800', high: '#f44336', criti
 
 // ─── Utility helpers ─────────────────────────────────────────────────
 
-/** Score from 1–25 → level string. */
+/** Score from 1–25 → level string. Aligned with store._autoRiskLevel thresholds. */
 function scoreToLevel(score) {
-  if (score <= 6) return LEVELS.low;
-  if (score <= 12) return LEVELS.medium;
-  if (score <= 19) return LEVELS.high;
-  return LEVELS.critical;
+  if (score >= 20) return LEVELS.critical;
+  if (score >= 12) return LEVELS.high;
+  if (score >= 6) return LEVELS.medium;
+  return LEVELS.low;
 }
 
 /** Level string → numeric midpoint for aggregation. */
@@ -222,14 +222,16 @@ export class RiskEngine {
   }
 
   // ── Report generation ────────────────────────────────────────────
-  generateReport(projectId) {
-    const projects = projectId
-      ? [this._store.state.projects.get(projectId)].filter(Boolean)
-      : [...this._store.state.projects.values()];
+  generateReport(projectId, snapshot) {
+    const projects = snapshot
+      ? (projectId ? snapshot.projects.filter(p => p.id === projectId) : [...snapshot.projects])
+      : (projectId
+          ? [this._store.state.projects.get(projectId)].filter(Boolean)
+          : [...this._store.state.projects.values()]);
 
-    const risks = this._getRisks(projectId);
-    const { matrix, summary } = this.calculateMatrix();
-    const scored = this.calculateRiskScores(projectId);
+    const risks = this._getRisks(projectId, snapshot);
+    const { matrix, summary } = snapshot ? this._calculateMatrixFrom(risks) : this.calculateMatrix();
+    const scored = snapshot ? this._calculateRiskScoresFrom(risks) : this.calculateRiskScores(projectId);
     const topRisks = scored.slice(0, 10);
 
     // Per-project risk info
@@ -278,8 +280,8 @@ export class RiskEngine {
   }
 
   // ── Export: text ──────────────────────────────────────────────────
-  exportReportText(projectId) {
-    const report = this.generateReport(projectId);
+  exportReportText(projectId, snapshot) {
+    const report = this.generateReport(projectId, snapshot);
     const lines = [];
     const hr = '═'.repeat(60);
 
@@ -344,8 +346,8 @@ export class RiskEngine {
   }
 
   // ── Export: HTML ──────────────────────────────────────────────────
-  exportReportHTML(projectId) {
-    const report = this.generateReport(projectId);
+  exportReportHTML(projectId, snapshot) {
+    const report = this.generateReport(projectId, snapshot);
     const { summary } = report.riskMatrix;
     const m = report.mitigationStatus;
 
@@ -417,10 +419,55 @@ ${recItems ? `<h2>Recommendations</h2><ul>${recItems}</ul>` : ''}
 
   // ── Private helpers ──────────────────────────────────────────────
 
-  /** Get risks, optionally filtered to a project. */
-  _getRisks(projectId) {
-    const all = [...this._store.state.risks.values()];
+  /** Get risks, optionally filtered to a project. If snapshot is provided, use it instead of live store. */
+  _getRisks(projectId, snapshot) {
+    const all = snapshot ? [...snapshot.risks] : [...this._store.state.risks.values()];
     return projectId ? all.filter((r) => r.projectId === projectId) : all;
+  }
+
+  /** Calculate matrix from a given set of risks (snapshot-based). */
+  _calculateMatrixFrom(risks) {
+    const matrix = [];
+    const summary = { low: 0, medium: 0, high: 0, critical: 0, total: 0 };
+
+    for (let p = 5; p >= 1; p--) {
+      const row = [];
+      for (let i = 1; i <= 5; i++) {
+        const score = p * i;
+        const level = scoreToLevel(score);
+        const cellRisks = risks.filter((r) => r.probability === p && r.impact === i);
+        row.push({
+          probability: p,
+          impact: i,
+          risks: cellRisks,
+          count: cellRisks.length,
+          level,
+        });
+        summary[level] += cellRisks.length;
+        summary.total += cellRisks.length;
+      }
+      matrix.push(row);
+    }
+
+    return { matrix, summary };
+  }
+
+  /** Calculate risk scores from a given set of risks (snapshot-based). */
+  _calculateRiskScoresFrom(risks) {
+    return risks
+      .map((risk) => {
+        const score = (risk.probability ?? 0) * (risk.impact ?? 0);
+        return {
+          riskId: risk.id,
+          name: risk.name,
+          score,
+          level: scoreToLevel(score),
+          probability: risk.probability,
+          impact: risk.impact,
+          priority: risk.priority ?? scoreToLevel(score),
+        };
+      })
+      .sort((a, b) => b.score - a.score);
   }
 
   /** Count risks by level. */
@@ -497,16 +544,17 @@ ${recItems ? `<h2>Recommendations</h2><ul>${recItems}</ul>` : ''}
     }
 
     // Department concentration
+    const projectMap = new Map(projects.map(p => [p.id, p]));
     const deptCounts = new Map();
     for (const risk of risks) {
-      const project = this._store.state.projects.get(risk.projectId);
+      const project = projectMap.get(risk.projectId);
       const dept = project?.department ?? 'Unknown';
       deptCounts.set(dept, (deptCounts.get(dept) ?? 0) + 1);
     }
     for (const [dept, count] of deptCounts) {
       if (count >= 3) {
         const highImpact = risks.filter((r) => {
-          const p = this._store.state.projects.get(r.projectId);
+          const p = projectMap.get(r.projectId);
           return (p?.department === dept) && (r.impact ?? 0) >= 4;
         }).length;
         if (highImpact >= 2) {
@@ -544,7 +592,7 @@ ${recItems ? `<h2>Recommendations</h2><ul>${recItems}</ul>` : ''}
       const total = risks.length;
       for (const [pid, count] of projRiskCounts) {
         if (count > total * 0.5 && total > 3) {
-          const project = this._store.state.projects.get(pid);
+          const project = projectMap.get(pid);
           recs.push(
             `Project "${project?.name ?? pid}" holds ${Math.round((count / total) * 100)}% of all risks — evaluate scope and risk distribution.`,
           );

@@ -755,8 +755,8 @@ function workingDaysBetween(startStr, endStr) {
 }
 
 function riskScoreToLevel(score) {
-  if (score <= 6) return 'low';
-  if (score <= 12) return 'medium';
-  if (score <= 19) return 'high';
-  return 'critical';
+  if (score >= 20) return 'critical';
+  if (score >= 12) return 'high';
+  if (score >= 6) return 'medium';
+  return 'low';
 }

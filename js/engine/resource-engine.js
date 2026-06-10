@@ -125,7 +125,16 @@ export class ResourceEngine {
   constructor(store) {
     this._store = store;
     this._cache = new Map();
-    this._cacheVersion = 0;
+    this._dirty = true;
+
+    // Subscribe to store changes for event-driven cache invalidation.
+    // This replaces the old count-based version check which failed when
+    // undo/redo restored the same number of items with different content.
+    this._store.subscribe((event) => {
+      if (['task', 'resource', 'batch', 'restore'].includes(event.type)) {
+        this._dirty = true;
+      }
+    });
   }
 
   // ── Conflict detection ───────────────────────────────────────────
@@ -486,7 +495,7 @@ export class ResourceEngine {
   // ── Cache management ─────────────────────────────────────────────
   clearCache() {
     this._cache.clear();
-    this._cacheVersion = 0;
+    this._dirty = true;
   }
 
   // ── Private helpers ──────────────────────────────────────────────
@@ -554,11 +563,9 @@ export class ResourceEngine {
 
   /** Invalidate all cached results when the underlying store has changed. */
   _invalidateIfStale() {
-    const s = this._store.state;
-    const version = `${s.tasks.size}:${s.resources.size}`;
-    if (this._cacheVersion !== version) {
+    if (this._dirty) {
       this._cache.clear();
-      this._cacheVersion = version;
+      this._dirty = false;
     }
   }
 }

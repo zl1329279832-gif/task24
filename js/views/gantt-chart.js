@@ -406,8 +406,9 @@ export class GanttChart {
       }
       // Cross-project deps
       if (t.crossProjectDeps) {
-        for (const depId of t.crossProjectDeps) {
-          const src = taskRowMap[depId];
+        for (const cpd of t.crossProjectDeps) {
+          const depTaskId = cpd.taskId || cpd;
+          const src = taskRowMap[depTaskId];
           if (!src) continue;
           this._drawArrow(svg, src.task, t, src.idx, entry.idx, true);
         }
