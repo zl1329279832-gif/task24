@@ -43,6 +43,7 @@ function snapshotState(store) {
     filters: deepClone(store.state.filters),
     selectedProjectId: store.state.selectedProjectId,
     view: store.state.view,
+    version: store.getVersion(),
   };
 }
 
@@ -262,7 +263,7 @@ export class HistoryManager {
       this._restoring = false;
     }
 
-    return { success: true, description: previous.description };
+    return { success: true, description: previous.description, version: this._store.getVersion() };
   }
 
   /**
@@ -287,7 +288,7 @@ export class HistoryManager {
       this._restoring = false;
     }
 
-    return { success: true, description: entry.description };
+    return { success: true, description: entry.description, version: this._store.getVersion() };
   }
 
   // -----------------------------------------------------------------------
@@ -367,7 +368,7 @@ export class HistoryManager {
       this._restoring = false;
     }
 
-    return { success: true, description: target.description };
+    return { success: true, description: target.description, version: this._store.getVersion() };
   }
 
   // -----------------------------------------------------------------------

@@ -76,6 +76,7 @@ export class BaselineManager {
       name: name || `Baseline ${this._baselines.size + 1}`,
       description: description || '',
       createdAt: Date.now(),
+      storeVersion: this._store.getVersion(),
       snapshot,
       metrics,
       frozen: true,
@@ -164,6 +165,34 @@ export class BaselineManager {
   /** Clear active baseline */
   clearActiveBaseline() {
     this._store.state.activeBaselineId = null;
+  }
+
+  /**
+   * Restore store state from a baseline's snapshot.
+   * Used to revert the project set to its state at baseline time.
+   * @param {string} id - baseline id
+   * @returns {boolean} success
+   */
+  restoreBaseline(id) {
+    const bl = this._baselines.get(id);
+    if (!bl || !bl.snapshot) return false;
+
+    const snapshot = deepClone(bl.snapshot);
+    this._store.replaceAll({
+      projects: snapshot.projects || [],
+      tasks: snapshot.tasks || [],
+      risks: snapshot.risks || [],
+      resources: snapshot.resources || [],
+    });
+
+    this._store.emitBaselineEvent('restore', { id, name: bl.name });
+    return true;
+  }
+
+  /** Get the store version recorded when a baseline was created */
+  getBaselineVersion(id) {
+    const bl = this._baselines.get(id);
+    return bl ? (bl.storeVersion ?? 0) : 0;
   }
 
   // -------------------------------------------------------------------------

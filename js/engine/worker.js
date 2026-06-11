@@ -810,20 +810,24 @@ function computeChangeImpact(payload) {
 
     var delayDays = 0;
     if (!isNew && bl.plannedEnd && cur.plannedEnd) {
-      var blEnd = new Date(bl.plannedEnd + 'T00:00:00');
-      var curEnd = new Date(cur.plannedEnd + 'T00:00:00');
-      if (!isNaN(blEnd.getTime()) && !isNaN(curEnd.getTime())) {
-        var sign = curEnd >= blEnd ? 1 : -1;
-        var from = sign === 1 ? blEnd : curEnd;
-        var to = sign === 1 ? curEnd : blEnd;
-        var cnt = 0;
-        var d = new Date(from);
-        while (d <= to) {
-          var dow = d.getDay();
-          if (dow !== 0 && dow !== 6) cnt++;
-          d.setDate(d.getDate() + 1);
+      if (bl.plannedEnd === cur.plannedEnd) {
+        delayDays = 0;
+      } else {
+        var blEnd = new Date(bl.plannedEnd + 'T00:00:00');
+        var curEnd = new Date(cur.plannedEnd + 'T00:00:00');
+        if (!isNaN(blEnd.getTime()) && !isNaN(curEnd.getTime())) {
+          var sign = curEnd >= blEnd ? 1 : -1;
+          var from = sign === 1 ? blEnd : curEnd;
+          var to = sign === 1 ? curEnd : blEnd;
+          var cnt = 0;
+          var d = new Date(from);
+          while (d <= to) {
+            var dow = d.getDay();
+            if (dow !== 0 && dow !== 6) cnt++;
+            d.setDate(d.getDate() + 1);
+          }
+          delayDays = sign * cnt;
         }
-        delayDays = sign * cnt;
       }
     }
 

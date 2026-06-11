@@ -66,7 +66,8 @@ export class DependencyEngine {
     /** @type {Map<string, Map<string, {freeSlack: number, totalSlack: number}>>} */
     this._slackCache = new Map();
 
-    this._cacheValid = false;
+    /** Store version at which caches were last computed */
+    this._cacheVersion = -1;
 
     // Invalidate cache on any task mutation or full state restore
     this._store.subscribe((event) => {
@@ -77,9 +78,19 @@ export class DependencyEngine {
   }
 
   _invalidateCache() {
-    this._cacheValid = false;
+    this._cacheVersion = -1;
     this._criticalPathCache.clear();
     this._slackCache.clear();
+  }
+
+  /** Check if caches are stale by comparing store version */
+  _ensureCacheValid() {
+    const currentVersion = this._store.getVersion();
+    if (this._cacheVersion !== currentVersion) {
+      this._criticalPathCache.clear();
+      this._slackCache.clear();
+      this._cacheVersion = currentVersion;
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -290,6 +301,7 @@ export class DependencyEngine {
    */
   calculateCriticalPath(projectId) {
     // Check cache
+    this._ensureCacheValid();
     const cacheKey = projectId || '__all__';
     if (this._criticalPathCache.has(cacheKey)) {
       return this._criticalPathCache.get(cacheKey);
@@ -635,6 +647,7 @@ export class DependencyEngine {
    * (values in calendar days)
    */
   calculateSlack(projectId) {
+    this._ensureCacheValid();
     const cacheKey = projectId || '__all__';
     if (this._slackCache.has(cacheKey)) return this._slackCache.get(cacheKey);
 

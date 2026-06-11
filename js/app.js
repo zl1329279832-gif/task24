@@ -82,7 +82,6 @@ class App {
     this.worker      = null;   // Web Worker handle
     this.workerReqId = 0;      // monotonic id for worker promise map
     this.workerPending = new Map(); // id → { resolve, reject }
-    this.stateVersion = 0;     // monotonic version for stale result filtering
 
     // Baseline & change impact
     this.baselineManager = new BaselineManager(this.store, {
@@ -184,8 +183,10 @@ class App {
 
         this.workerPending.delete(id);
 
-        // Discard stale results — older version means state has moved on
-        if (stateVersion !== undefined && pending.version !== undefined && stateVersion < pending.version) {
+        // Discard stale results — if the store has moved on since the
+        // request was made, the result is based on outdated data.
+        const currentVersion = this.store.getVersion();
+        if (stateVersion !== undefined && stateVersion < currentVersion) {
           pending.resolve(null);
           return;
         }
@@ -212,9 +213,9 @@ class App {
   workerRequest(type, payload) {
     if (!this.worker) return Promise.resolve(null);
     const id = ++this.workerReqId;
-    const version = this.stateVersion;
+    const version = this.store.getVersion();
     return new Promise((resolve, reject) => {
-      this.workerPending.set(id, { resolve, reject, version });
+      this.workerPending.set(id, { resolve, reject });
       this.worker.postMessage({ id, type, payload: { ...payload, _stateVersion: version } });
     });
   }
@@ -289,6 +290,9 @@ class App {
       } catch (_) { /* validation is best-effort */ }
     }
 
+    // Capture pre-import snapshot for rollback on cycle detection
+    const preImportSnapshot = this.store.exportData();
+
     // Suppress history auto-capture during import so we get exactly one snapshot
     this.historyManager._restoring = true;
     const results = [];
@@ -307,8 +311,33 @@ class App {
       this.historyManager._restoring = false;
     }
 
+    // Post-import validation: check for cycles and duplicate allocations
+    const postImportIssues = this.validationEngine.validateAll();
+    const blockingIssues = postImportIssues.filter(i => i.severity === 'error');
+
+    if (blockingIssues.length > 0) {
+      // Rollback: restore pre-import state
+      this.historyManager._restoring = true;
+      try {
+        this.store.replaceAll(preImportSnapshot);
+      } finally {
+        this.historyManager._restoring = false;
+      }
+
+      for (const issue of blockingIssues) {
+        this.showToast(`导入已回滚: ${issue.message}`, 'error', 8000);
+      }
+      return;
+    }
+
     // Push a single undo checkpoint after all imports
     this.historyManager.push('CSV 导入');
+
+    // Show non-blocking warnings from post-import validation
+    const postWarnings = postImportIssues.filter(i => i.severity === 'warning');
+    for (const warn of postWarnings) {
+      this.showToast(warn.message, 'warning', 4000);
+    }
 
     // Summarise
     const ok   = results.filter((r) => r.ok);
@@ -404,11 +433,6 @@ class App {
   /* ---------------------------------------------------------------------- */
 
   onStoreChange(event) {
-    // Increment state version for worker stale-result filtering
-    if (['task', 'project', 'risk', 'resource', 'batch', 'restore'].includes(event?.type)) {
-      this.stateVersion++;
-    }
-
     this.updateStatusBar();
     this._debouncedRender();
 
@@ -594,6 +618,7 @@ class App {
     const activeBaseline = this.baselineManager.getActiveBaseline();
     if (activeBaseline) {
       const currentSnapshot = this.store.exportData();
+      const requestVersion = this.store.getVersion();
       let currentCritIds = [];
       try {
         const cp = this.dependencyEngine.calculateCriticalPath(null);
@@ -606,9 +631,13 @@ class App {
         baselineCriticalPath: activeBaseline.metrics.criticalPathTaskIds || [],
         currentCriticalPath: currentCritIds,
       }).then(result => {
+        // Discard if store has moved on since request
+        if (this.store.getVersion() > requestVersion) return;
         if (result) {
           result.baselineId = activeBaseline.id;
           result.computedAt = Date.now();
+          result.storeVersion = requestVersion;
+          result.baselineVersion = activeBaseline.storeVersion ?? 0;
           this.store.state.changeDiff = result;
         }
       });

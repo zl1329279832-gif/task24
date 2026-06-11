@@ -97,6 +97,17 @@ export class Store {
     /** Batch queue -- null when not batching */
     this._batchQueue = null;
 
+    /**
+     * Monotonically increasing version number.
+     * Incremented on every data-mutating event dispatch.
+     * Used by Worker, HistoryManager, BaselineManager, and ChangeImpactEngine
+     * to detect stale results and align computations.
+     */
+    this._version = 0;
+
+    /** Event types that represent data mutations (used for version bumping) */
+    this._mutatingTypes = new Set(['project', 'task', 'risk', 'resource', 'batch', 'restore']);
+
     /** Expose a reactive `state` proxy for convenient reads */
     this.state = this._buildStateProxy();
   }
@@ -120,6 +131,7 @@ export class Store {
           case 'scenarios': return [...self._scenarios];
           case 'activeBaselineId': return self._activeBaselineId;
           case 'changeDiff':       return self._changeDiff;
+          case 'version':          return self._version;
           default:          return undefined;
         }
       },
@@ -173,6 +185,10 @@ export class Store {
       this._batchQueue.push(event);
       return;
     }
+    // Bump version for data-mutating events
+    if (this._mutatingTypes.has(event.type)) {
+      this._version++;
+    }
     for (const { listener, typeFilter } of this._subscribers) {
       if (!typeFilter || typeFilter === event.type) {
         try { listener(event); } catch (e) { console.error('Store subscriber error:', e); }
@@ -183,6 +199,19 @@ export class Store {
   /** Emit a baseline-related event (used by BaselineManager / ChangeImpactEngine) */
   emitBaselineEvent(path, value) {
     this._emit({ type: 'baseline', path, value });
+  }
+
+  /** Return the current monotonic version number */
+  getVersion() {
+    return this._version;
+  }
+
+  /**
+   * Force-set the version number (used by HistoryManager on undo/redo restore
+   * to ensure the version is always strictly increasing).
+   */
+  setVersion(v) {
+    this._version = Math.max(this._version, v);
   }
 
   /**
@@ -199,6 +228,8 @@ export class Store {
       this._batchQueue = prev;
 
       if (events.length > 0 && this._batchQueue === null) {
+        // Bump version for the batch event
+        this._version++;
         // Emit a single 'batch' event containing all sub-events
         const batchEvent = { type: 'batch', path: null, value: events };
         for (const { listener, typeFilter } of this._subscribers) {
@@ -514,6 +545,7 @@ export class Store {
       risks: Array.from(this._risks.values()).map(deepClone),
       resources: Array.from(this._resources.values()).map(deepClone),
       timestamp: Date.now(),
+      version: this._version,
     });
   }
 

@@ -14,6 +14,7 @@ function deepClone(obj) {
 /** Working-day-aware date difference (end - start). Positive = current is later. */
 function workingDayDiff(startStr, endStr) {
   if (!startStr || !endStr) return 0;
+  if (startStr === endStr) return 0;
   const start = new Date(startStr + 'T00:00:00');
   const end = new Date(endStr + 'T00:00:00');
   if (isNaN(start.getTime()) || isNaN(end.getTime())) return 0;
@@ -118,6 +119,8 @@ export class ChangeImpactEngine {
     const diff = {
       baselineId: id,
       computedAt: Date.now(),
+      storeVersion: this._store.getVersion(),
+      baselineVersion: baseline.storeVersion ?? 0,
       taskChanges,
       criticalPathDiff,
       resourceOverloadDiff,
@@ -140,6 +143,7 @@ export class ChangeImpactEngine {
     const baseline = this._baselineManager.getBaseline(id);
     if (!baseline) return null;
 
+    const requestVersion = this._store.getVersion();
     const currentSnapshot = deepClone(this._store.exportData());
     let currentCritIds = [];
     try {
@@ -154,9 +158,16 @@ export class ChangeImpactEngine {
       currentCriticalPath: currentCritIds,
     });
 
+    // Discard stale result: if the store has moved on since the request
+    if (this._store.getVersion() > requestVersion) {
+      return this.computeDiff(id);
+    }
+
     if (result) {
       result.baselineId = id;
       result.computedAt = Date.now();
+      result.storeVersion = requestVersion;
+      result.baselineVersion = baseline.storeVersion ?? 0;
       this._lastDiff = result;
       this._stale = false;
     }
@@ -282,8 +293,11 @@ export class ChangeImpactEngine {
     this._stale = true;
 
     if (this._debounceTimer) clearTimeout(this._debounceTimer);
+    const versionAtRequest = this._store.getVersion();
     this._debounceTimer = setTimeout(() => {
       this._debounceTimer = null;
+      // Discard if the store has moved on since we scheduled this recompute
+      if (this._store.getVersion() !== versionAtRequest) return;
       const diff = this.computeDiff();
       if (diff) {
         this._store.state.changeDiff = diff;
