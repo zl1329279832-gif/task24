@@ -54,13 +54,19 @@ self.onmessage = function (e) {
       default:
         throw new Error('Unknown message type: ' + type);
     }
-    self.postMessage({ id: id, type: type, result: result, stateVersion: payload._stateVersion || 0 });
+    self.postMessage({
+      id: id, type: type, result: result,
+      stateVersion: payload._stateVersion || 0,
+      generation: payload._generation || 0,
+      portfolioId: payload._portfolioId || '',
+    });
   } catch (err) {
     self.postMessage({
-      id: id,
-      type: type,
+      id: id, type: type,
       error: err.message || String(err),
       stateVersion: payload._stateVersion || 0,
+      generation: payload._generation || 0,
+      portfolioId: payload._portfolioId || '',
     });
   }
 };

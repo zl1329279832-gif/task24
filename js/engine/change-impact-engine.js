@@ -123,7 +123,23 @@ export class ChangeImpactEngine {
       resourceOverloadDiff,
       riskChanges,
       summary: null,
+      versionMetadata: null,
     };
+
+    // Attach version compatibility metadata
+    try {
+      const compat = this._baselineManager.validateVersionCompatibility(id);
+      diff.versionMetadata = {
+        baselineVersion: compat.baselineVersion,
+        currentVersion: compat.currentVersion,
+        portfolioMatch: compat.portfolioMatch,
+        versionDelta: compat.versionDelta,
+        versionCompatible: compat.compatible,
+        versionWarning: !compat.compatible ? compat.reason : null,
+      };
+    } catch (_) {
+      diff.versionMetadata = { versionCompatible: true, versionWarning: null };
+    }
 
     diff.summary = this._buildSummary(diff);
 
@@ -242,7 +258,17 @@ export class ChangeImpactEngine {
     const issues = [];
     if (!this._lastDiff) return issues;
 
-    const { taskChanges, summary } = this._lastDiff;
+    const { taskChanges, summary, versionMetadata } = this._lastDiff;
+
+    // Flag version incompatibility
+    if (versionMetadata && !versionMetadata.versionCompatible) {
+      issues.push({
+        severity: 'warning',
+        type: 'version-mismatch',
+        message: `Baseline version mismatch: baseline was captured at state v${versionMetadata.baselineVersion}, current state is v${versionMetadata.currentVersion}. ${versionMetadata.versionWarning || ''}`,
+        affectedIds: [],
+      });
+    }
 
     // Flag large delays
     for (const tc of taskChanges) {
@@ -280,6 +306,17 @@ export class ChangeImpactEngine {
     if (!this._store.state.activeBaselineId) return;
 
     this._stale = true;
+
+    // On restore (undo/redo/import), clear any pending debounce and skip
+    // auto-recompute — the app controller will trigger a fresh computation
+    // via _syncWorker after the generation bump.
+    if (event.type === 'restore') {
+      if (this._debounceTimer) {
+        clearTimeout(this._debounceTimer);
+        this._debounceTimer = null;
+      }
+      return;
+    }
 
     if (this._debounceTimer) clearTimeout(this._debounceTimer);
     this._debounceTimer = setTimeout(() => {

@@ -81,8 +81,8 @@ class App {
     this.views       = {};     // cache of instantiated views
     this.worker      = null;   // Web Worker handle
     this.workerReqId = 0;      // monotonic id for worker promise map
-    this.workerPending = new Map(); // id → { resolve, reject }
-    this.stateVersion = 0;     // monotonic version for stale result filtering
+    this.workerPending = new Map(); // id → { resolve, reject, stateVersion, generation, portfolioId }
+    this._generation  = 0;     // generation counter bumped on undo/redo/restore/import
 
     // Baseline & change impact
     this.baselineManager = new BaselineManager(this.store, {
@@ -174,7 +174,7 @@ class App {
     try {
       this.worker = new Worker('js/engine/worker.js', { type: 'module' });
       this.worker.onmessage = (e) => {
-        const { id, result, error, progress, stateVersion } = e.data;
+        const { id, result, error, progress, stateVersion, generation, portfolioId } = e.data;
         const pending = this.workerPending.get(id);
         if (!pending) return;
 
@@ -184,8 +184,19 @@ class App {
 
         this.workerPending.delete(id);
 
-        // Discard stale results — older version means state has moved on
-        if (stateVersion !== undefined && pending.version !== undefined && stateVersion < pending.version) {
+        // Three-layer staleness check:
+        // 1. Generation mismatch — state lineage changed (undo/redo/import)
+        if (generation !== undefined && pending.generation !== undefined && generation !== pending.generation) {
+          pending.resolve(null);
+          return;
+        }
+        // 2. Portfolio mismatch — completely different state identity
+        if (portfolioId !== undefined && pending.portfolioId !== undefined && portfolioId !== pending.portfolioId) {
+          pending.resolve(null);
+          return;
+        }
+        // 3. Older stateVersion within the same generation
+        if (stateVersion !== undefined && pending.stateVersion !== undefined && stateVersion < pending.stateVersion) {
           pending.resolve(null);
           return;
         }
@@ -212,10 +223,15 @@ class App {
   workerRequest(type, payload) {
     if (!this.worker) return Promise.resolve(null);
     const id = ++this.workerReqId;
-    const version = this.stateVersion;
+    const stateVersion = this.store.state.stateVersion;
+    const generation = this._generation;
+    const portfolioId = this.store.state.portfolioId;
     return new Promise((resolve, reject) => {
-      this.workerPending.set(id, { resolve, reject, version });
-      this.worker.postMessage({ id, type, payload: { ...payload, _stateVersion: version } });
+      this.workerPending.set(id, { resolve, reject, stateVersion, generation, portfolioId });
+      this.worker.postMessage({
+        id, type,
+        payload: { ...payload, _stateVersion: stateVersion, _generation: generation, _portfolioId: portfolioId },
+      });
     });
   }
 
@@ -291,6 +307,7 @@ class App {
 
     // Suppress history auto-capture during import so we get exactly one snapshot
     this.historyManager._restoring = true;
+    this._generation++; // import creates new generation
     const results = [];
     try {
       for (const file of files) {
@@ -404,9 +421,10 @@ class App {
   /* ---------------------------------------------------------------------- */
 
   onStoreChange(event) {
-    // Increment state version for worker stale-result filtering
-    if (['task', 'project', 'risk', 'resource', 'batch', 'restore'].includes(event?.type)) {
-      this.stateVersion++;
+    // Bump generation on restore events (undo/redo/import/full replace)
+    // Store already bumps _stateVersion on every mutation internally
+    if (event?.type === 'restore') {
+      this._generation++;
     }
 
     this.updateStatusBar();
@@ -605,6 +623,8 @@ class App {
         currentSnapshot,
         baselineCriticalPath: activeBaseline.metrics.criticalPathTaskIds || [],
         currentCriticalPath: currentCritIds,
+        _generation: this._generation,
+        _portfolioId: this.store.state.portfolioId,
       }).then(result => {
         if (result) {
           result.baselineId = activeBaseline.id;

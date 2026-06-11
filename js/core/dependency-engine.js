@@ -67,6 +67,7 @@ export class DependencyEngine {
     this._slackCache = new Map();
 
     this._cacheValid = false;
+    this._cacheVersion = -1;  // store version when cache was last built
 
     // Invalidate cache on any task mutation or full state restore
     this._store.subscribe((event) => {
@@ -78,8 +79,14 @@ export class DependencyEngine {
 
   _invalidateCache() {
     this._cacheValid = false;
+    this._cacheVersion = -1;
     this._criticalPathCache.clear();
     this._slackCache.clear();
+  }
+
+  /** Return the store version at which the cache was last built (-1 if invalid) */
+  getCachedVersion() {
+    return this._cacheVersion;
   }
 
   // -----------------------------------------------------------------------
@@ -260,6 +267,8 @@ export class DependencyEngine {
             cycles.push({
               cycle: [...cycle],
               description: `Circular dependency detected: ${names.join(' -> ')} -> ${names[0]}`,
+              fingerprint: [...cycle].sort().join(':'),
+              detectedAtVersion: this._store.state.stateVersion,
             });
           }
         } else if (color.get(next) === 0) {
@@ -388,6 +397,7 @@ export class DependencyEngine {
 
     const result = { taskIds: criticalIds, totalDuration };
     this._criticalPathCache.set(cacheKey, result);
+    this._cacheVersion = this._store.state.stateVersion;
     return result;
   }
 

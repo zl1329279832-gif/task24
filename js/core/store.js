@@ -91,6 +91,12 @@ export class Store {
     /** Current change diff relative to active baseline */
     this._changeDiff = null;
 
+    /** Monotonic version counter — bumped on every mutation */
+    this._stateVersion = 0;
+
+    /** Unique portfolio identity — regenerated on import/replaceAll to distinguish state lineages */
+    this._portfolioId = uid();
+
     /** Subscriber registry: each entry is { listener, typeFilter } */
     this._subscribers = [];
 
@@ -120,6 +126,8 @@ export class Store {
           case 'scenarios': return [...self._scenarios];
           case 'activeBaselineId': return self._activeBaselineId;
           case 'changeDiff':       return self._changeDiff;
+          case 'stateVersion':    return self._stateVersion;
+          case 'portfolioId':     return self._portfolioId;
           default:          return undefined;
         }
       },
@@ -149,6 +157,29 @@ export class Store {
   }
 
   // -----------------------------------------------------------------------
+  // Version management
+  // -----------------------------------------------------------------------
+
+  /** Increment the monotonic state version counter */
+  _bumpVersion() {
+    this._stateVersion++;
+  }
+
+  /**
+   * Public method for HistoryManager to signal a generation change
+   * (undo/redo/jumpTo).  Bumps the version counter so that any pending
+   * worker computations are recognised as stale.
+   */
+  bumpGeneration() {
+    this._bumpVersion();
+  }
+
+  /** Regenerate the portfolio identity — signals a new state lineage */
+  _regeneratePortfolioId() {
+    this._portfolioId = uid();
+  }
+
+  // -----------------------------------------------------------------------
   // Subscription system
   // -----------------------------------------------------------------------
 
@@ -169,6 +200,10 @@ export class Store {
 
   /** Emit an event to all matching subscribers (respects batching) */
   _emit(event) {
+    // Stamp version metadata on every event
+    if (event.stateVersion === undefined) event.stateVersion = this._stateVersion;
+    if (event.portfolioId === undefined) event.portfolioId = this._portfolioId;
+
     if (this._batchQueue !== null) {
       this._batchQueue.push(event);
       return;
@@ -225,6 +260,7 @@ export class Store {
     p.endDate = p.endDate || null;
     p.color = p.color || '#4A90D9';
     this._projects.set(p.id, p);
+    this._bumpVersion();
     this._emit({ type: 'project', path: 'add', value: deepClone(p) });
   }
 
@@ -233,6 +269,7 @@ export class Store {
     if (!existing) return;
     const merged = { ...existing, ...deepClone(changes), id }; // id is immutable
     this._projects.set(id, merged);
+    this._bumpVersion();
     this._emit({ type: 'project', path: 'update', value: deepClone(merged) });
   }
 
@@ -247,6 +284,7 @@ export class Store {
     for (const [rid, r] of this._risks) {
       if (r.projectId === id) this._risks.delete(r.id);
     }
+    this._bumpVersion();
     this._emit({ type: 'project', path: 'remove', value: deepClone(removed) });
   }
 
@@ -273,6 +311,7 @@ export class Store {
     t.estimatedDays = t.estimatedDays ?? 0;
     t.priority = t.priority ?? 3;
     this._tasks.set(t.id, t);
+    this._bumpVersion();
     this._emit({ type: 'task', path: 'add', value: deepClone(t) });
   }
 
@@ -281,6 +320,7 @@ export class Store {
     if (!existing) return;
     const merged = { ...existing, ...deepClone(changes), id };
     this._tasks.set(id, merged);
+    this._bumpVersion();
     this._emit({ type: 'task', path: 'update', value: deepClone(merged) });
   }
 
@@ -298,6 +338,7 @@ export class Store {
     for (const [rid, r] of this._risks) {
       if (r.taskId === id) this._risks.delete(rid);
     }
+    this._bumpVersion();
     this._emit({ type: 'task', path: 'remove', value: deepClone(removed) });
   }
 
@@ -317,6 +358,7 @@ export class Store {
       ? (newEnd instanceof Date ? newEnd.toISOString().slice(0, 10) : newEnd)
       : existing.plannedEnd;
     this._tasks.set(id, existing);
+    this._bumpVersion();
     this._emit({
       type: 'task',
       path: 'move',
@@ -342,6 +384,7 @@ export class Store {
     r.status = r.status || 'open';
     r.owner = r.owner || '';
     this._risks.set(r.id, r);
+    this._bumpVersion();
     this._emit({ type: 'risk', path: 'add', value: deepClone(r) });
   }
 
@@ -354,6 +397,7 @@ export class Store {
       merged.level = this._autoRiskLevel(merged.probability, merged.impact);
     }
     this._risks.set(id, merged);
+    this._bumpVersion();
     this._emit({ type: 'risk', path: 'update', value: deepClone(merged) });
   }
 
@@ -361,6 +405,7 @@ export class Store {
     if (!this._risks.has(id)) return;
     const removed = this._risks.get(id);
     this._risks.delete(id);
+    this._bumpVersion();
     this._emit({ type: 'risk', path: 'remove', value: deepClone(removed) });
   }
 
@@ -385,6 +430,7 @@ export class Store {
     r.tasks = r.tasks || [];
     r.maxCapacity = r.maxCapacity ?? 100;
     this._resources.set(r.id, r);
+    this._bumpVersion();
     this._emit({ type: 'resource', path: 'add', value: deepClone(r) });
   }
 
@@ -393,6 +439,7 @@ export class Store {
     if (!existing) return;
     const merged = { ...existing, ...deepClone(changes), id };
     this._resources.set(id, merged);
+    this._bumpVersion();
     this._emit({ type: 'resource', path: 'update', value: deepClone(merged) });
   }
 
@@ -400,6 +447,7 @@ export class Store {
     if (!this._resources.has(id)) return;
     const removed = this._resources.get(id);
     this._resources.delete(id);
+    this._bumpVersion();
     this._emit({ type: 'resource', path: 'remove', value: deepClone(removed) });
   }
 
@@ -413,6 +461,7 @@ export class Store {
    * Accepts { projects?, tasks?, risks?, resources? } as arrays or objects.
    */
   importData(data) {
+    this._regeneratePortfolioId();
     this.batch(() => {
       // Build an ID-mapping table so that internal references can be rewritten
       const idMap = new Map(); // oldId -> newId
@@ -478,6 +527,8 @@ export class Store {
       tasks: Array.from(this._tasks.values()).map(deepClone),
       risks: Array.from(this._risks.values()).map(deepClone),
       resources: Array.from(this._resources.values()).map(deepClone),
+      _stateVersion: this._stateVersion,
+      _portfolioId: this._portfolioId,
     };
   }
 
@@ -486,8 +537,14 @@ export class Store {
    * Emits a single 'batch' event (via batch()) followed by a dedicated
    * 'restore' event so engines and views can distinguish a full state
    * swap from incremental mutations.
+   * @param {Object}  data
+   * @param {Object}  [options]
+   * @param {boolean} [options.preservePortfolioId=false] - keep current portfolioId (used by undo/redo)
    */
-  replaceAll(data) {
+  replaceAll(data, options = {}) {
+    if (!options.preservePortfolioId) {
+      this._regeneratePortfolioId();
+    }
     this.batch(() => {
       this._projects.clear();
       this._tasks.clear();
@@ -514,6 +571,8 @@ export class Store {
       risks: Array.from(this._risks.values()).map(deepClone),
       resources: Array.from(this._resources.values()).map(deepClone),
       timestamp: Date.now(),
+      _stateVersion: this._stateVersion,
+      _portfolioId: this._portfolioId,
     });
   }
 
@@ -685,6 +744,7 @@ export class Store {
     const scenario = this._scenarios[index];
     const snapshot = deepClone(scenario.snapshot);
 
+    this._regeneratePortfolioId();
     this.batch(() => {
       // Clear current data
       for (const id of [...this._projects.keys()]) this._projects.delete(id);

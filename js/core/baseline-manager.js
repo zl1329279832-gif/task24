@@ -67,10 +67,10 @@ export class BaselineManager {
     // 1. Capture snapshot
     const snapshot = deepClone(this._store.exportData());
 
-    // 2. Compute metrics from live engines
-    const metrics = this._computeMetrics(snapshot);
+    // 2. Compute metrics from the snapshot (NOT from live engines)
+    const metrics = this._computeMetricsFromSnapshot(snapshot);
 
-    // 3. Build baseline object
+    // 3. Build baseline object with version metadata
     const baseline = {
       id,
       name: name || `Baseline ${this._baselines.size + 1}`,
@@ -79,6 +79,9 @@ export class BaselineManager {
       snapshot,
       metrics,
       frozen: true,
+      stateVersion: this._store.state.stateVersion,
+      portfolioId: this._store.state.portfolioId,
+      metricsVersion: this._store.state.stateVersion,
     };
 
     // 4. Deep freeze for immutability
@@ -217,6 +220,10 @@ export class BaselineManager {
       this._baselines.clear();
       for (const bl of (data.baselines || [])) {
         if (bl && bl.id && bl.snapshot) {
+          // Backfill legacy baselines with version metadata
+          if (bl.stateVersion === undefined) bl.stateVersion = 0;
+          if (bl.portfolioId === undefined) bl.portfolioId = 'legacy';
+          if (bl.metricsVersion === undefined) bl.metricsVersion = bl.stateVersion;
           deepFreeze(bl);
           this._baselines.set(bl.id, bl);
         }
@@ -296,15 +303,81 @@ export class BaselineManager {
     if (!baseline.snapshot.projects || !Array.isArray(baseline.snapshot.projects)) return false;
     if (!baseline.snapshot.risks || !Array.isArray(baseline.snapshot.risks)) return false;
     if (!baseline.snapshot.resources || !Array.isArray(baseline.snapshot.resources)) return false;
+    // Version fields are optional but must be valid if present
+    if (baseline.stateVersion !== undefined && (typeof baseline.stateVersion !== 'number' || baseline.stateVersion < 0)) return false;
+    if (baseline.metricsVersion !== undefined && (typeof baseline.metricsVersion !== 'number' || baseline.metricsVersion < 0)) return false;
     return true;
+  }
+
+  /**
+   * Check whether a baseline's version metadata is compatible with the
+   * current store state.  Returns a structured compatibility report.
+   * @param {string} baselineId
+   * @returns {{ compatible: boolean, reason: string, baselineVersion: number, currentVersion: number, portfolioMatch: boolean, versionDelta: number }}
+   */
+  validateVersionCompatibility(baselineId) {
+    const bl = this._baselines.get(baselineId);
+    if (!bl) {
+      return {
+        compatible: false,
+        reason: 'Baseline not found',
+        baselineVersion: 0,
+        currentVersion: this._store.state.stateVersion,
+        portfolioMatch: false,
+        versionDelta: 0,
+      };
+    }
+
+    const baselineVersion = bl.stateVersion ?? 0;
+    const currentVersion = this._store.state.stateVersion;
+    const baselinePortfolio = bl.portfolioId ?? 'legacy';
+    const currentPortfolio = this._store.state.portfolioId;
+    const portfolioMatch = baselinePortfolio === currentPortfolio;
+    const versionDelta = currentVersion - baselineVersion;
+
+    // Legacy baselines (pre-versioning) are not considered compatible
+    if (baselinePortfolio === 'legacy') {
+      return {
+        compatible: false,
+        reason: 'Legacy baseline (pre-versioning) — metrics may not reflect current state lineage',
+        baselineVersion,
+        currentVersion,
+        portfolioMatch: false,
+        versionDelta,
+      };
+    }
+
+    if (!portfolioMatch) {
+      return {
+        compatible: false,
+        reason: 'Portfolio lineage changed (state was imported or fully replaced since baseline was saved)',
+        baselineVersion,
+        currentVersion,
+        portfolioMatch: false,
+        versionDelta,
+      };
+    }
+
+    return {
+      compatible: true,
+      reason: 'Version compatible',
+      baselineVersion,
+      currentVersion,
+      portfolioMatch: true,
+      versionDelta,
+    };
   }
 
   // -------------------------------------------------------------------------
   // Private
   // -------------------------------------------------------------------------
 
-  /** Compute metrics from the current live state */
-  _computeMetrics(snapshot) {
+  /**
+   * Compute metrics entirely from a snapshot's arrays (NOT from live engines).
+   * This ensures the baseline records a true point-in-time record that
+   * cannot drift when the store is later undone/redone.
+   */
+  _computeMetricsFromSnapshot(snapshot) {
     const metrics = {
       criticalPathTaskIds: [],
       totalDuration: 0,
@@ -316,31 +389,193 @@ export class BaselineManager {
       resourceCount: snapshot.resources.length,
     };
 
-    // Critical path
+    // Critical path — self-contained CPM on the frozen task array
     try {
-      const cp = this._depEngine.calculateCriticalPath(null);
+      const cp = this._computeCriticalPathFromTasks(snapshot.tasks || []);
       metrics.criticalPathTaskIds = cp.taskIds || [];
       metrics.totalDuration = cp.totalDuration || 0;
-    } catch (_) { /* engine may not have data */ }
+    } catch (_) { /* tasks may be empty or malformed */ }
 
-    // Resource overloads
+    // Resource overloads — computed from snapshot arrays
     try {
-      const overloads = this._resEngine.findOverloadedResources();
-      metrics.resourceLoads = overloads.map(o => ({
-        resourceId: o.resourceId,
-        peakAllocation: o.peakAllocation || 0,
-        overloadedDays: o.overloadedDays || 0,
-      }));
+      metrics.resourceLoads = this._computeResourceLoadsFromSnapshot(snapshot);
     } catch (_) { /* */ }
 
-    // Risk levels
-    metrics.riskLevels = snapshot.risks.map(r => ({
+    // Risk levels — direct from snapshot
+    metrics.riskLevels = (snapshot.risks || []).map(r => ({
       riskId: r.id,
       level: r.level || 'low',
       score: (r.probability || 1) * (r.impact || 1),
     }));
 
     return metrics;
+  }
+
+  /**
+   * Self-contained Critical Path Method on a task array.
+   * Uses Kahn's topological sort + forward/backward pass.
+   * Returns { taskIds: string[], totalDuration: number }.
+   */
+  _computeCriticalPathFromTasks(tasks) {
+    if (!tasks || tasks.length === 0) return { taskIds: [], totalDuration: 0 };
+
+    const taskMap = new Map(tasks.map(t => [t.id, t]));
+    const DAY_MS = 86_400_000;
+
+    const toMs = (d) => {
+      if (!d) return NaN;
+      const ms = new Date(d).getTime();
+      return ms;
+    };
+
+    // Build predecessor/successor adjacency
+    const predecessors = new Map();
+    const successors = new Map();
+    for (const t of tasks) {
+      predecessors.set(t.id, []);
+      successors.set(t.id, []);
+    }
+
+    for (const t of tasks) {
+      const deps = [
+        ...(t.dependencies || []),
+        ...(t.crossProjectDeps || []).map(cpd => cpd.taskId),
+      ];
+      for (const depId of deps) {
+        if (taskMap.has(depId)) {
+          if (!predecessors.get(t.id).includes(depId)) predecessors.get(t.id).push(depId);
+          if (!successors.get(depId).includes(t.id)) successors.get(depId).push(t.id);
+        }
+      }
+    }
+
+    // Topological sort (Kahn's)
+    const inDegree = new Map();
+    for (const t of tasks) inDegree.set(t.id, predecessors.get(t.id).length);
+    const queue = [];
+    for (const [id, deg] of inDegree) if (deg === 0) queue.push(id);
+
+    const topoOrder = [];
+    while (queue.length > 0) {
+      const cur = queue.shift();
+      topoOrder.push(cur);
+      for (const succ of (successors.get(cur) || [])) {
+        const newDeg = inDegree.get(succ) - 1;
+        inDegree.set(succ, newDeg);
+        if (newDeg === 0) queue.push(succ);
+      }
+    }
+    // Append cycle tasks at end
+    if (topoOrder.length < tasks.length) {
+      const inTopo = new Set(topoOrder);
+      for (const t of tasks) if (!inTopo.has(t.id)) topoOrder.push(t.id);
+    }
+
+    // Compute durations
+    const durations = new Map();
+    for (const t of tasks) {
+      const start = toMs(t.plannedStart);
+      const end = toMs(t.plannedEnd);
+      const dur = (Number.isFinite(start) && Number.isFinite(end))
+        ? Math.max(1, Math.round((end - start) / DAY_MS))
+        : (t.estimatedDays || 1);
+      durations.set(t.id, dur);
+    }
+
+    // Forward pass — ES/EF (in days from 0)
+    const ES = new Map();
+    const EF = new Map();
+    for (const tid of topoOrder) {
+      let maxPredEF = 0;
+      for (const pred of (predecessors.get(tid) || [])) {
+        if ((EF.get(pred) || 0) > maxPredEF) maxPredEF = EF.get(pred);
+      }
+      ES.set(tid, maxPredEF);
+      EF.set(tid, maxPredEF + durations.get(tid));
+    }
+
+    // Project duration
+    let projectDuration = 0;
+    for (const t of tasks) {
+      if ((EF.get(t.id) || 0) > projectDuration) projectDuration = EF.get(t.id);
+    }
+
+    // Backward pass — LF/LS
+    const LF = new Map();
+    const LS = new Map();
+    for (let i = topoOrder.length - 1; i >= 0; i--) {
+      const tid = topoOrder[i];
+      let minSuccLS = projectDuration;
+      for (const succ of (successors.get(tid) || [])) {
+        if ((LS.get(succ) ?? projectDuration) < minSuccLS) minSuccLS = LS.get(succ);
+      }
+      LF.set(tid, minSuccLS);
+      LS.set(tid, minSuccLS - durations.get(tid));
+    }
+
+    // Identify critical tasks (total float ≈ 0)
+    const criticalIds = [];
+    for (const t of tasks) {
+      const totalFloat = (LS.get(t.id) || 0) - (ES.get(t.id) || 0);
+      if (Math.abs(totalFloat) < 0.01) criticalIds.push(t.id);
+    }
+
+    return { taskIds: criticalIds, totalDuration: projectDuration };
+  }
+
+  /**
+   * Compute resource overload information from snapshot arrays.
+   * Returns array of { resourceId, peakAllocation, overloadedDays }.
+   */
+  _computeResourceLoadsFromSnapshot(snapshot) {
+    const taskMap = new Map((snapshot.tasks || []).map(t => [t.id, t]));
+    const loads = [];
+
+    for (const resource of (snapshot.resources || [])) {
+      if (!resource.tasks || resource.tasks.length === 0) continue;
+
+      const maxCap = resource.maxCapacity || 100;
+      let peakAllocation = 0;
+      let overloadedDays = 0;
+
+      // Build daily allocation using event sweep
+      const events = new Map(); // dateStr -> delta
+      for (const assignment of resource.tasks) {
+        const task = taskMap.get(assignment.taskId);
+        if (!task || !task.plannedStart || !task.plannedEnd) continue;
+
+        const alloc = assignment.allocation || 0;
+        const start = new Date(task.plannedStart + 'T00:00:00');
+        const end = new Date(task.plannedEnd + 'T00:00:00');
+        if (isNaN(start.getTime()) || isNaN(end.getTime())) continue;
+
+        // Simple day-by-day sweep
+        const d = new Date(start);
+        while (d <= end) {
+          const dow = d.getDay();
+          if (dow !== 0 && dow !== 6) {
+            const key = d.toISOString().slice(0, 10);
+            events.set(key, (events.get(key) || 0) + alloc);
+          }
+          d.setDate(d.getDate() + 1);
+        }
+      }
+
+      for (const [, total] of events) {
+        if (total > peakAllocation) peakAllocation = total;
+        if (total > maxCap) overloadedDays++;
+      }
+
+      if (peakAllocation > 0) {
+        loads.push({
+          resourceId: resource.id,
+          peakAllocation,
+          overloadedDays,
+        });
+      }
+    }
+
+    return loads;
   }
 
   /** Evict oldest baselines if over the limit */

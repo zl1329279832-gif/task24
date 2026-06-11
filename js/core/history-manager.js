@@ -43,6 +43,8 @@ function snapshotState(store) {
     filters: deepClone(store.state.filters),
     selectedProjectId: store.state.selectedProjectId,
     view: store.state.view,
+    _stateVersion: store.state.stateVersion,
+    _portfolioId: store.state.portfolioId,
   };
 }
 
@@ -58,7 +60,7 @@ function restoreState(store, snapshot) {
     tasks: snapshot.tasks || [],
     risks: snapshot.risks || [],
     resources: snapshot.resources || [],
-  });
+  }, { preservePortfolioId: true });
 
   // Restore filter/view state (these are not part of replaceAll)
   if (snapshot.filters) {
@@ -222,6 +224,8 @@ export class HistoryManager {
       description: description || 'State change',
       timestamp: Date.now(),
       snapshot: deepClone(snapshot),
+      stateVersion: this._store.state.stateVersion,
+      portfolioId: this._store.state.portfolioId,
     });
 
     // Trim oldest entries if we exceed the maximum size
@@ -258,6 +262,7 @@ export class HistoryManager {
     try {
       restoreState(this._store, previous.snapshot);
       this._lastSnapshot = snapshotState(this._store);
+      this._store.bumpGeneration();
     } finally {
       this._restoring = false;
     }
@@ -283,6 +288,7 @@ export class HistoryManager {
     try {
       restoreState(this._store, entry.snapshot);
       this._lastSnapshot = snapshotState(this._store);
+      this._store.bumpGeneration();
     } finally {
       this._restoring = false;
     }
@@ -315,6 +321,8 @@ export class HistoryManager {
         timestamp: entry.timestamp,
         index,
         isCurrent: index === this._undoStack.length - 1,
+        stateVersion: entry.stateVersion,
+        portfolioId: entry.portfolioId,
       }))
       .reverse();
   }
@@ -328,6 +336,8 @@ export class HistoryManager {
       description: 'Cleared history',
       timestamp: Date.now(),
       snapshot: deepClone(snapshot),
+      stateVersion: this._store.state.stateVersion,
+      portfolioId: this._store.state.portfolioId,
     }];
     this._redoStack.length = 0;
     this._lastSnapshot = snapshot;
@@ -363,6 +373,7 @@ export class HistoryManager {
     try {
       restoreState(this._store, target.snapshot);
       this._lastSnapshot = snapshotState(this._store);
+      this._store.bumpGeneration();
     } finally {
       this._restoring = false;
     }
